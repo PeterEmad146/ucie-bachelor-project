@@ -1,0 +1,4 @@
+{
+    "systemverilog.linter":"verilator",
+    "systemverilog.launchConfiguration": "verilator --lint-only -Wall"
+}
