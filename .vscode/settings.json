@@ -1,4 +1,20 @@
 {
     "systemverilog.linter":"verilator",
-    "systemverilog.launchConfiguration": "verilator --lint-only -Wall"
+    "systemverilog.launchConfiguration": "verilator --lint-only -Wall",
+    "python.analysis.extraPaths": ["${workspaceFolder}/gem5/src/python"],
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/gem5/src",
+                "${workspaceFolder}/gem5/build/X86"
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
 }
