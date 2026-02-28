@@ -1,0 +1,12 @@
+# SystemVerilog linting Rules for UCIe Project
+# Enforce coding standards for consistency across RTL modules
+
+-verilator-module-comments
+-verilator-port-comments
+-wire-void
+-operator-assignment
+-always-comb-blocking
+-priority-default-not-last
+-explicit-begin-block-in-generate
+-no-tabs
+
