@@ -39,14 +39,14 @@ UcieLink::init()
 
 // --- TX Port Methods ---
 UcieLink::UcieTxPort::UcieTxPort(const std::string& name, UcieLink *owner) : 
-    RequestPort(name, owner), owner(owner) {}
+    RequestPort(name), owner(owner) {}
 
 bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt) {return true; }
 void UcieLink::UcieTxPort::recvReqRetry() {}
 
 // --- RX Port Methods ---
 UcieLink::UcieRxPort::UcieRxPort(const std::string& name, UcieLink *owner) :
-    ResponsePort(name, owner), owner(owner) {}
+    ResponsePort(name), owner(owner) {}
 
 Tick UcieLink::UcieRxPort::recvAtomic(PacketPtr pkt) { return owner->logicalPhy.linkLatency; }
 void UcieLink::UcieRxPort::recvFunctional(PacketPtr pkt) {}
