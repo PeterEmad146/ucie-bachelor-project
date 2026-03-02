@@ -1,0 +1,4 @@
+Import('*')
+
+SimObject('UcieLink.py', sim_objects=['UcieLink'])
+Source('ucie_link.cc')
