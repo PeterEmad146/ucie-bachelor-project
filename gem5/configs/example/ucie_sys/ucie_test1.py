@@ -20,7 +20,7 @@ system = System()
 # We create a clock domain running at 1 GHz and assign it a default voltage.
 # By attaching this to 'system.clk_domain', every component we add to the system
 # will automatically inherit this clock speed unless we specify otherwise.
-system.clk_domain = SrcClockDomain(clock='1Ghz', voltage_domain=VoltageDomain())
+system.clk_domain = SrcClockDomain(clock='1GHz', voltage_domain=VoltageDomain())
 
 # =========================================================================
 # 2. Instantiate the Hardware (Custom SimObjects)
@@ -30,6 +30,15 @@ system.clk_domain = SrcClockDomain(clock='1Ghz', voltage_domain=VoltageDomain())
 # we wrote (UcieLink.py), which then maps to the C++ variables in ucie_link.cc.
 system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
 system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
+
+# =========================================================================
+# 3. Wire the Hardware Together 
+# =========================================================================
+# gem5 uses port bindings to simulate physical wires.
+# We connect the Transmit (Request) port of one chiplet to the Receive (Response)
+# port of the other, establishing full-duplex, bidirectional communication.
+system.chiplet_A.tx_port = system.chiplet_B.rx_port
+system.chiplet_B.tx_port = system.chiplet_A.rx_port
 
 # =========================================================================
 # 4. Simulation Initialization
