@@ -1,6 +1,8 @@
+// Header guards to prevent double-inclusion during compilation
 #ifndef __UCIE_UCIE_LINK_HH__
 #define __UCIE_UCIE_LINK_HH__
 
+// This is the auto-generated file created by SCons from UcieLink.py
 #include "params/UcieLink.hh"
 #include "sim/clocked_object.hh"
 #include "mem/port.hh"
@@ -15,26 +17,36 @@ class UcieLink : public ClockedObject
         // ========================================
         // PORT DEFINITIONS (Bidirectional Link)
         // ========================================
+
+        // Transmit Port (Master/Sender)
         class UcieTxPort : public RequestPort
         {
             private: 
-                UcieLink *owner;
+                UcieLink *owner;    // Pointer back to the main controller
             public:
                 UcieTxPort(const std::string& name, UcieLink *owner);
+                // Called when the adjacent chiplet sends a response back to us
                 bool recvTimingResp(PacketPtr pkt) override;
+                // Called when the adjacent chiplet is full and tells us to back off
                 void recvReqRetry() override;
         };
 
+        // Receive Port (Slave/Receiver)
         class UcieRxPort : public ResponsePort
         {
             private:
-                UcieLink *owner;
+                UcieLink *owner;    // Pointer back to the main controller
             public:
                 UcieRxPort(const std::string& name, UcieLink *owner);
+                // Used for instantaneous, 0-tick memory reads (backdoor access)
                 Tick recvAtomic(PacketPtr pkt) override;
+                // Used for debugging to instantly write to memory
                 void recvFunctional(PacketPtr pkt) override;
+                // The main function: Called when a packet actually arrives on the wire
                 bool recvTimingReq(PacketPtr pkt) override;
+                // Called to tell the sender they can try sending again
                 void recvRespRetry() override;
+                // Defines what memory addresses this port is responsible for
                 AddrRangeList getAddrRanges() const override;
         };
 
@@ -43,6 +55,7 @@ class UcieLink : public ClockedObject
         // ==============================
 
         // Sub-modules encapsulating D2D and PHY functionalities
+        // In Week 3, the FlitPacker logic and Ack/Nak queues will live in here.
         struct D2DAdapter {
             uint64_t retryBufferCapacity;
             uint32_t flitSize;
@@ -53,13 +66,17 @@ class UcieLink : public ClockedObject
             Tick linkLatency;
         } logicalPhy;
 
+        // Instantiate the two physical ports
         UcieTxPort txPort;
         UcieRxPort rxPort;
 
     public:
+        // Constructor that takes the auto-generated Python parameters.
         UcieLink(const UcieLinkParams &p);
 
+        // Required by gem5 to wire the ports together during initialization
         Port &getPort(const std::string &if_name, PortID idx = InvalidPortID) override;
+        // Called right before the simuation starts ticking
         void init() override;
 };
 
