@@ -28,8 +28,8 @@ system.clk_domain = SrcClockDomain(clock='1GHz', voltage_domain=VoltageDomain())
 # We are creating two instances of our custom UcieLink hardware.
 # The parameters we pass here map directly to the Python configuration class
 # we wrote (UcieLink.py), which then maps to the C++ variables in ucie_link.cc.
-system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kiB', flit_size=256)
-system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kiB', flit_size=256)
+system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
+system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
 
 # =========================================================================
 # 3. Wire the Hardware Together 

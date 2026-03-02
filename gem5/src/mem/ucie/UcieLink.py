@@ -26,7 +26,7 @@ class UcieLink(ClockedObject):
     # These match the exact specifications from the referece paper.
     # When gem5 copmiles, it creates a C++ variable for each of these.
     link_latency = Param.Latency('2ns', "Physical Link Latency")
-    retry_buffer_capacity = Param.MemorySize('32kiB', "Adapter Buffer Size")
+    retry_buffer_capacity = Param.MemorySize('32kB', "Adapter Buffer Size")
     flit_size = Param.Int(256, "UCIe Flit Size in Bytes")
     link_width = Param.Int(16, "Link Width in Lanes")
     data_rate = Param.String('16GT/s', "Data Rate per pin")
