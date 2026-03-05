@@ -70,6 +70,9 @@ class UcieLink : public ClockedObject
         UcieTxPort txPort;
         UcieRxPort rxPort;
 
+        // Instantiate the FlitPacker
+        FlitPacker txPacker;
+
     public:
         // Constructor that takes the auto-generated Python parameters.
         UcieLink(const UcieLinkParams &p);
