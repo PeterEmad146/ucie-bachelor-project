@@ -140,7 +140,23 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         warn("Created new UCIe Flit! Sequence Number: %d, Contains %d original TLPs.",
             packedFlit->sequenceNumber, packedFlit->originalPackets.size());
         
-            // (Next task: Push this flit into the Ack/Nak Retry Buffer and send it)
+        // (Next task: Push this flit into the Ack/Nak Retry Buffer and send it)
+        // 1. Store a copy in the Retry Buffer in case we need to resent it
+        owner->d2dAdapter.txRetryBuffer.push_back(packedFlit);
+        warn("Flit added to Retry Buffer. Buffer currently holds %d flit(s).",
+            owner->d2dAdapter.txRetryBuffer.size());
+
+        // 2. Attempt to send the flit across the physical wire via the TX Port!
+        // (We pass 'packedFlit', which inherits from Packet, so the port accepts it)
+        bool success = owner->txPort.sendTimingReq(packedFlit);
+
+        if (!success) {
+            warn("Transmission failed! The adjacent chiplet is busy. Flit remains in buffer for retry.");
+            // We leave the flit in the txRetryBuffer. We will try again later
+            // when the other chiplet calls recvReqRetry().
+        } else {
+            warn("Flit successfully transmitted across the UCIe link!");
+        }
     }
 
     // Tell the CPU we successfully accepted its packet
