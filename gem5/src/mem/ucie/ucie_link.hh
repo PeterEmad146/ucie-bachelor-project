@@ -100,6 +100,23 @@ class UcieFlitPacket : public Packet
         }
 };
 
+// 2. The Flit Packer Engine
+class FlitPacker
+{
+    private:
+        uint32_t targetFlitSize;
+        uint32_t currentBytes;
+        uint64_t nextSequenceNumber;
+        std::vector<PacketPtr> stagingBuffer;   // Temporarily holds TLPs until we reach 256B
+
+    public:
+        FlitPacker(uint32_t flit_size);
+
+        // Accepts an incoming TLP. Returns a UcieFlitPacket if 256B is reached 
+        // otherwise returns nullptr (meaning it's still waiting for more data)
+        UcieFlitPacket* processIncomingTLP(PacketPtr pkt);
+};
+
 } // namespace gem5
 
 #endif  // __UCIE_UCIE_LINK_HH__
