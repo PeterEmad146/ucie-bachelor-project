@@ -80,6 +80,26 @@ class UcieLink : public ClockedObject
         void init() override;
 };
 
+// =========================================================================
+// WEEK 3: UCIe FLIT PAKCET & PACKER LOGIC
+// =========================================================================
+
+// 1. The custom Flit Pakcet (Inherits from gem5's standard Packet)
+// This perfectly aligns with the methodology in the reference paper.
+class UcieFlitPacket : public Packet
+{
+    public:
+        uint64_t sequenceNumber;    // We will use this next for the Ack/Nak retry buffer
+        std::vector<PacketPtr> originalPackets; // The original TLPs packed inside this flit
+
+        // Constructor creates a new packet of the specified flit size
+        UcieFlitPacket(RequestPtr req, MemCmd cmd, uint32_t flit_size, uint64_t seq_num)
+            : Packet (req, cmd, flit_size), sequenceNumber(seq_num)
+        {
+            allocate(); // Allocate the physical 256 bytes in the simulator's memory
+        }
+};
+
 } // namespace gem5
 
 #endif  // __UCIE_UCIE_LINK_HH__
