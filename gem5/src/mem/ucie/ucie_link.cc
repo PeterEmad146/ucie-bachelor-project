@@ -55,7 +55,8 @@ UcieLink::UcieLink(const UcieLinkParams &p) :
     // Initialize the ports with a name, but notice we do NOT pass 'owner'
     // to the base class to avoid the deprecated ownership warnings!
     txPort(name() + ".tx_port", this),
-    rxPort(name() + ".rx_port", this)
+    rxPort(name() + ".rx_port", this),
+    txPacker(p.flit_size)
 {
     // Map the Python parameters to our C++ structs
     d2dAdapter.retryBufferCapacity = p.retry_buffer_capacity;
@@ -129,7 +130,21 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
     // 2. Use the FlitPacker class to process the 256B flits.
     // 3. Schedule an event based on logicalPhy.linklatency to process it.
 
-    return true;    // For now, blindly accept all incoming packets.
+    // The CPU or Memory just sent us a packet.
+    // Hand it to the D2D Adapter's Flit Packer.
+    UcieFlitPacket* packedFlit = owner->txPacker.processIncomingTLP(pkt);
+
+    if (packedFlit != nullptr) {
+        // SUCCESS! We formed a complete 256B Flit.
+        // We print a debug message to prove it worked.
+        warn("Created new UCIe Flit! Sequence Number: %d, Contains %d original TLPs.",
+            packedFlit->sequenceNumber, packedFlit->originalPackets.size());
+        
+            // (Next task: Push this flit into the Ack/Nak Retry Buffer and send it)
+    }
+
+    // Tell the CPU we successfully accepted its packet
+    return true;
 }
 
 void UcieLink::UcieRxPort::recvRespRetry() 
