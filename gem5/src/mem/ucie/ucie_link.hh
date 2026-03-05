@@ -7,6 +7,7 @@
 #include "sim/clocked_object.hh"
 #include "mem/port.hh"
 #include "mem/packet.hh"
+#include <deque>
 
 namespace gem5 
 {
@@ -97,6 +98,10 @@ class UcieLink : public ClockedObject
         struct D2DAdapter {
             uint64_t retryBufferCapacity;
             uint32_t flitSize;
+
+            // Week 3: The Ack/Nak Retry Buffer
+            // Holds pointers to flits that have been packed but not yet Acknowledged
+            std::deque<UcieFlitPacket*> txRetryBuffer;
         } d2dAdapter;
 
         struct LogicalPhy {
