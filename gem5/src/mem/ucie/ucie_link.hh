@@ -11,6 +11,44 @@
 namespace gem5 
 {
 
+// =========================================================================
+// WEEK 3: UCIe FLIT PAKCET & PACKER LOGIC
+// =========================================================================
+
+// 1. The custom Flit Pakcet (Inherits from gem5's standard Packet)
+// This perfectly aligns with the methodology in the reference paper.
+class UcieFlitPacket : public Packet
+{
+    public:
+        uint64_t sequenceNumber;    // We will use this next for the Ack/Nak retry buffer
+        std::vector<PacketPtr> originalPackets; // The original TLPs packed inside this flit
+
+        // Constructor creates a new packet of the specified flit size
+        UcieFlitPacket(RequestPtr req, MemCmd cmd, uint32_t flit_size, uint64_t seq_num)
+            : Packet (req, cmd, flit_size), sequenceNumber(seq_num)
+        {
+            allocate(); // Allocate the physical 256 bytes in the simulator's memory
+        }
+};
+
+// 2. The Flit Packer Engine
+class FlitPacker
+{
+    private:
+        uint32_t targetFlitSize;
+        uint32_t currentBytes;
+        uint64_t nextSequenceNumber;
+        std::vector<PacketPtr> stagingBuffer;   // Temporarily holds TLPs until we reach 256B
+
+    public:
+        FlitPacker(uint32_t flit_size);
+
+        // Accepts an incoming TLP. Returns a UcieFlitPacket if 256B is reached 
+        // otherwise returns nullptr (meaning it's still waiting for more data)
+        UcieFlitPacket* processIncomingTLP(PacketPtr pkt);
+};
+
+
 class UcieLink : public ClockedObject
 {
     private:
@@ -83,42 +121,6 @@ class UcieLink : public ClockedObject
         void init() override;
 };
 
-// =========================================================================
-// WEEK 3: UCIe FLIT PAKCET & PACKER LOGIC
-// =========================================================================
-
-// 1. The custom Flit Pakcet (Inherits from gem5's standard Packet)
-// This perfectly aligns with the methodology in the reference paper.
-class UcieFlitPacket : public Packet
-{
-    public:
-        uint64_t sequenceNumber;    // We will use this next for the Ack/Nak retry buffer
-        std::vector<PacketPtr> originalPackets; // The original TLPs packed inside this flit
-
-        // Constructor creates a new packet of the specified flit size
-        UcieFlitPacket(RequestPtr req, MemCmd cmd, uint32_t flit_size, uint64_t seq_num)
-            : Packet (req, cmd, flit_size), sequenceNumber(seq_num)
-        {
-            allocate(); // Allocate the physical 256 bytes in the simulator's memory
-        }
-};
-
-// 2. The Flit Packer Engine
-class FlitPacker
-{
-    private:
-        uint32_t targetFlitSize;
-        uint32_t currentBytes;
-        uint64_t nextSequenceNumber;
-        std::vector<PacketPtr> stagingBuffer;   // Temporarily holds TLPs until we reach 256B
-
-    public:
-        FlitPacker(uint32_t flit_size);
-
-        // Accepts an incoming TLP. Returns a UcieFlitPacket if 256B is reached 
-        // otherwise returns nullptr (meaning it's still waiting for more data)
-        UcieFlitPacket* processIncomingTLP(PacketPtr pkt);
-};
 
 } // namespace gem5
 
