@@ -193,8 +193,12 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
                 incomingFlit->req, MemCmd::WriteReq, 0, incomingFlit->sequenceNumber, true
             );
 
+            // Force the engine to flip all internal Response Flags
+            nakPkt->makeResponse();
+
             sendTimingResp(nakPkt); // Fire NAK back to Sender
-            delete incomingFlit;    // Trash the corrupted data
+            // DO NOT DELETE incomingFlit! Chiplet A needs it to retransmit.
+            // delete incomingFlit;    // Trash the corrupted data
             return true;
 
         }
@@ -224,11 +228,13 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         UcieFlitPacket* ackPkt = new UcieFlitPacket(
             incomingFlit->req, MemCmd::WriteReq, 0, incomingFlit->sequenceNumber, false
         );
+        ackPkt->makeResponse(); // Force Response flags
         sendTimingResp(ackPkt);
 
-        // Cleanup: We successfully unpacked the data, so we destroy the 
-        // 256-Byte flit container to free up simulator RAM.
-        delete incomingFlit;
+        // DO NOT DELETE incomingFlit! Chiplet A will delete it when it gets this ACK.
+        // // Cleanup: We successfully unpacked the data, so we destroy the 
+        // // 256-Byte flit container to free up simulator RAM.
+        // delete incomingFlit;
 
         // 2. Attempt to drain the RX buffer into the memory module
         while (!owner->d2dAdapter.rxBuffer.empty()) 
