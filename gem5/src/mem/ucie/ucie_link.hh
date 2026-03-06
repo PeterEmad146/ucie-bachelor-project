@@ -102,6 +102,9 @@ class UcieLink : public ClockedObject
             // Week 3: The Ack/Nak Retry Buffer
             // Holds pointers to flits that have been packed but not yet Acknowledged
             std::deque<UcieFlitPacket*> txRetryBuffer;
+
+            // The unpacking buffer (For holding TLPs waiting for Memory)
+            std::deque<PacketPtr> rxBuffer;
         } d2dAdapter;
 
         struct LogicalPhy {
