@@ -134,20 +134,45 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         warn("RECEIVER: Got a UCIe Flit! Sequence Number: %d. Unpacking %d TLPs...",
             incomingFlit->sequenceNumber, incomingFlit->originalPackets.size());
         
-        // Loop through the flit and extracts the original 64-Byte packets
-        for (PacketPtr originalTLP : incomingFlit->originalPackets) {
-            // Send the unpacked 64-Byte packet out the TX port to the RAM
-            bool success = owner->txPort.sendTimingReq(originalTLP);
+        // // Loop through the flit and extracts the original 64-Byte packets
+        // for (PacketPtr originalTLP : incomingFlit->originalPackets) {
+        //     // Send the unpacked 64-Byte packet out the TX port to the RAM
+        //     bool success = owner->txPort.sendTimingReq(originalTLP);
 
-            if(!success) {
-                warn("RECEIVER: Memory is busy! Failed to send unpacked TLP.");
-                // (Handling memory backpressure is a task for later)
-            }
+        //     if(!success) {
+        //         warn("RECEIVER: Memory is busy! Failed to send unpacked TLP.");
+        //         // (Handling memory backpressure is a task for later)
+        //     }
+        // }
+
+        // 1. Push all unpacked TLPs into the safe RX Buffer
+        for (PacketPtr originalTLP : incomingFlit->originalPackets) {
+            owner->d2dAdapter.rxBuffer.push_back(originalTLP);
         }
 
         // Cleanup: We successfully unpacked the data, so we destroy the 
         // 256-Byte flit container to free up simulator RAM.
         delete incomingFlit;
+
+        while (!owner->d2dAdapter.rxBuffer.empty()) 
+        {
+            // Look at the first packet in line
+            PacketPtr frontPkt = owner->d2dAdapter.rxBuffer.front();
+
+            // Try to send it
+            bool success = owner->txPort.sendTimingReq(frontPkt);
+
+            if(success) {
+                // Memory accepted it! Remove it from our waiting room.
+                owner->d2dAdapter.rxBuffer.pop_front();
+            } else {
+                // Memory rejected it! We stop trying and wait for a wake-up call.
+                warn("RECEIVER: Memory is busy! Leaving remaining %d TLP(s) in RX Buffer.",
+                    owner->d2dAdapter.rxBuffer.size());
+                break;
+            }
+        }
+        
 
     } else {
         // ==========================================================
