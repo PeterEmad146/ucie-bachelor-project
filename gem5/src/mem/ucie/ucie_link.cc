@@ -224,7 +224,7 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
             // (Next task: Push this flit into the Ack/Nak Retry Buffer and send it)
             // 1. Store a copy in the Retry Buffer in case we need to resent it
             owner->d2dAdapter.txRetryBuffer.push_back(packedFlit);
-            warn("Flit added to Retry Buffer. Buffer currently holds %d flit(s).",
+            warn("SENDER: Flit added to Retry Buffer. Buffer currently holds %d flit(s).",
                 owner->d2dAdapter.txRetryBuffer.size());
 
             // 2. Attempt to send the flit across the physical wire via the TX Port!
