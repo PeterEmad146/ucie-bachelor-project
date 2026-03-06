@@ -3,6 +3,7 @@ from m5.objects import *
 
 # 1. Basic System Setup
 system = System()
+system.mem_mode = 'timing' # THIS IS THE MAGIC KEY!
 system.clk_domain = SrcClockDomain(clock='1GHz', voltage_domain=VoltageDomain())
 system.mem_ranges = [AddrRange('512MB')] # Required for the Traffic Generator
 
@@ -31,9 +32,6 @@ print("=====================================================")
 print("Starting Traffic Generation Test...")
 print("Injecting 64-Byte TLPs into the UCIe pipeline...")
 print("=====================================================")
-
-# Turn on the traffic generator
-system.tgen.start()
 
 # Run the simulation for 100,000 ticks
 # Since it fires every 1,000 ticks, this will generate 100 packets,
