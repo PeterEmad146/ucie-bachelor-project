@@ -4,18 +4,18 @@ from m5.objects import *
 # 1. Basic System Setup
 system = System()
 system.clk_domain = SrcClockDomain(clock='1GHz', voltage_domain=VoltageDomain())
-system.mem_range = [AddrRange('512MB')] # Required for the Traffic Generator
+system.mem_ranges = [AddrRange('512MB')] # Required for the Traffic Generator
 
 # 2. Instantiate the Components
 # The CPU (Traffic Generator) on Die A
-system.tgen = TrafficGen(config_file="tgen.cfg")
+system.tgen = TrafficGen(config_file="configs/example/ucie_sys/tgen.cfg")
 
 # The UCIe Interconnect
 system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
 system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
 
 # The RAM on Die B
-system.mem_ctrl = SimpleMemory(range=system.mem_range[0])
+system.mem_ctrl = SimpleMemory(range=system.mem_ranges[0])
 
 # 3. Wire the Pipeline End-to-End
 # TrafficGen -> Chiplet A -> Chiplet B -> Memory
