@@ -32,5 +32,10 @@ print("Starting Traffic Generation Test...")
 print("Injecting 64-Byte TLPs into the UCIe pipeline...")
 print("=====================================================")
 
-# Run the simulation for 10,000 ticks
-m5.simulate(10000)
+# Turn on the traffic generator
+system.tgen.start()
+
+# Run the simulation for 100,000 ticks
+# Since it fires every 1,000 ticks, this will generate 100 packets,
+# which will perfectly pack into 25 UCIe flits
+m5.simulate(100000)
