@@ -158,6 +158,25 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         // ==========================================================
         // RECEIVER LOGIC (E.g., Chiplet B handling an incoming Flit)
         // ==========================================================
+
+        // ERROR Injection (10% Chance of Failure)
+        bool crcFailed = (rand() % 10 == 0);
+
+        if (crcFailed) {
+            warn("RECEIVER: [CRC ERROR] Flit %d corrupted! Sending NAK.", incomingFlit->sequenceNumber);
+
+            // Create a NAK response (Notice we pass 'true' at the end)
+            UcieFlitPacket* nakPkt = new UcieFlitPacket(
+                incomingFlit->req, MemCmd::WriteReq, 0, incomingFlit->sequenceNumber, true
+            );
+
+            sendTimingResp(nakPkt); // Fire NAK back to Sender
+            delete incomingFlit;    // Trash the corrupted data
+            return true;
+
+        }
+
+
         warn("RECEIVER: Got a UCIe Flit! Sequence Number: %d. Unpacking %d TLPs...",
             incomingFlit->sequenceNumber, incomingFlit->originalPackets.size());
         
@@ -177,10 +196,18 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
             owner->d2dAdapter.rxBuffer.push_back(originalTLP);
         }
 
+        // SEND ACKNOWLEDGE (ACK)
+        // Flit was good, tell the sender to clear their buffer! (Pass 'false')
+        UcieFlitPacket* ackPkt = new UcieFlitPacket(
+            incomingFlit->req, MemCmd::WriteReq, 0, incomingFlit->sequenceNumber, false
+        );
+        sendTimingResp(ackPkt);
+
         // Cleanup: We successfully unpacked the data, so we destroy the 
         // 256-Byte flit container to free up simulator RAM.
         delete incomingFlit;
 
+        // 2. Attempt to drain the RX buffer into the memory module
         while (!owner->d2dAdapter.rxBuffer.empty()) 
         {
             // Look at the first packet in line
@@ -236,19 +263,21 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
                 // We leave the flit in the txRetryBuffer. We will try again later
                 // when the other chiplet calls recvReqRetry().
             } else {
-                warn("SENDER: Flit successfully transmitted across the UCIe link!");
+                warn("SENDER: Flit %d transmitted! Waiting for ACK/NAK...", packedFlit->sequenceNumber);
+                // WE DELETED THE INSTANT POP_FRONT() HACK!
+                // The flit safely stays in the txRetryBuffer until we hear back.
+                // warn("SENDER: Flit successfully transmitted across the UCIe link!");
 
-                // TEMPORARY BUFFER FIX:
-                // Because we haven't written the reverse Ack signal yet, we will
-                // instantly clear the buffer upon a successful transmission so it 
-                // doesn't grow to infinity!
-                owner->d2dAdapter.txRetryBuffer.pop_front();
-                warn("SENDER: Flit removed. Buffer currently holds %d flit(s).",
-                    owner->d2dAdapter.txRetryBuffer.size());
+                // // TEMPORARY BUFFER FIX:
+                // // Because we haven't written the reverse Ack signal yet, we will
+                // // instantly clear the buffer upon a successful transmission so it 
+                // // doesn't grow to infinity!
+                // owner->d2dAdapter.txRetryBuffer.pop_front();
+                // warn("SENDER: Flit removed. Buffer currently holds %d flit(s).",
+                //     owner->d2dAdapter.txRetryBuffer.size());
             }
         }
     }
-
 
     // Tell the CPU we successfully accepted its packet
     return true;
