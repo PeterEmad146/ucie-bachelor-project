@@ -124,40 +124,79 @@ void UcieLink::UcieRxPort::recvFunctional(PacketPtr pkt)
 
 bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt) 
 { 
-    // Week 3 Task: This is where the magic happes!
-    // When a packet arrives from the other chiplet, we will:
-    // 1. Pass it to the D2DAdapater.
-    // 2. Use the FlitPacker class to process the 256B flits.
-    // 3. Schedule an event based on logicalPhy.linklatency to process it.
+    // 1. THE TRAFFIC COP: Check if the incoming packet is a UCIe Flit
+    UcieFlitPacket* incomingFlit = dynamic_cast<UcieFlitPacket*>(pkt);
 
-    // The CPU or Memory just sent us a packet.
-    // Hand it to the D2D Adapter's Flit Packer.
-    UcieFlitPacket* packedFlit = owner->txPacker.processIncomingTLP(pkt);
-
-    if (packedFlit != nullptr) {
-        // SUCCESS! We formed a complete 256B Flit.
-        // We print a debug message to prove it worked.
-        warn("Created new UCIe Flit! Sequence Number: %d, Contains %d original TLPs.",
-            packedFlit->sequenceNumber, packedFlit->originalPackets.size());
+    if (incomingFlit != nullptr) {
+        // ==========================================================
+        // RECEIVER LOGIC (E.g., Chiplet B handling an incoming Flit)
+        // ==========================================================
+        warn("RECEIVER: Got a UCIe Flit! Sequence Number: %d. Unpacking %d TLPs...",
+            incomingFlit->sequenceNumber, incomingFlit->originalPackets.size());
         
-        // (Next task: Push this flit into the Ack/Nak Retry Buffer and send it)
-        // 1. Store a copy in the Retry Buffer in case we need to resent it
-        owner->d2dAdapter.txRetryBuffer.push_back(packedFlit);
-        warn("Flit added to Retry Buffer. Buffer currently holds %d flit(s).",
-            owner->d2dAdapter.txRetryBuffer.size());
+        // Loop through the flit and extracts the original 64-Byte packets
+        for (PacketPtr originalTLP : incomingFlit->originalPackets) {
+            // Send the unpacked 64-Byte packet out the TX port to the RAM
+            bool success = owner->txPort.sendTimingReq(originalTLP);
 
-        // 2. Attempt to send the flit across the physical wire via the TX Port!
-        // (We pass 'packedFlit', which inherits from Packet, so the port accepts it)
-        bool success = owner->txPort.sendTimingReq(packedFlit);
+            if(!success) {
+                warn("RECEIVER: Memory is busy! Failed to send unpacked TLP.");
+                // (Handling memory backpressure is a task for later)
+            }
+        }
 
-        if (!success) {
-            warn("Transmission failed! The adjacent chiplet is busy. Flit remains in buffer for retry.");
-            // We leave the flit in the txRetryBuffer. We will try again later
-            // when the other chiplet calls recvReqRetry().
-        } else {
-            warn("Flit successfully transmitted across the UCIe link!");
+        // Cleanup: We successfully unpacked the data, so we destroy the 
+        // 256-Byte flit container to free up simulator RAM.
+        delete incomingFlit;
+
+    } else {
+        // ==========================================================
+        // SENDER LOGIC (E.g., Chiplet A handling CPU Traffic)
+        // ==========================================================
+
+        // When a packet arrives from the other chiplet, we will:
+        // 1. Pass it to the D2DAdapater.
+        // 2. Use the FlitPacker class to process the 256B flits.
+        // 3. Schedule an event based on logicalPhy.linklatency to process it.
+
+        // The CPU or Memory just sent us a packet.
+        // Hand it to the D2D Adapter's Flit Packer.
+        UcieFlitPacket* packedFlit = owner->txPacker.processIncomingTLP(pkt);
+
+        if (packedFlit != nullptr) {
+            // SUCCESS! We formed a complete 256B Flit.
+            // We print a debug message to prove it worked.
+            warn("SENDER: Created new UCIe Flit! Sequence Number: %d, Contains %d original TLPs.",
+                packedFlit->sequenceNumber, packedFlit->originalPackets.size());
+            
+            // (Next task: Push this flit into the Ack/Nak Retry Buffer and send it)
+            // 1. Store a copy in the Retry Buffer in case we need to resent it
+            owner->d2dAdapter.txRetryBuffer.push_back(packedFlit);
+            warn("Flit added to Retry Buffer. Buffer currently holds %d flit(s).",
+                owner->d2dAdapter.txRetryBuffer.size());
+
+            // 2. Attempt to send the flit across the physical wire via the TX Port!
+            // (We pass 'packedFlit', which inherits from Packet, so the port accepts it)
+            bool success = owner->txPort.sendTimingReq(packedFlit);
+
+            if (!success) {
+                warn("SENDER: Transmission failed! The adjacent chiplet is busy. Flit remains in buffer for retry.");
+                // We leave the flit in the txRetryBuffer. We will try again later
+                // when the other chiplet calls recvReqRetry().
+            } else {
+                warn("SENDER: Flit successfully transmitted across the UCIe link!");
+
+                // TEMPORARY BUFFER FIX:
+                // Because we haven't written the reverse Ack signal yet, we will
+                // instantly clear the buffer upon a successful transmission so it 
+                // doesn't grow to infinity!
+                owner->d2dAdapter.txRetryBuffer.pop_front();
+                warn("SENDER: Flit removed. Buffer currently holds %d flit(s).",
+                    owner->d2dAdapter.txRetryBuffer.size());
+            }
         }
     }
+
 
     // Tell the CPU we successfully accepted its packet
     return true;
