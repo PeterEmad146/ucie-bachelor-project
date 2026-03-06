@@ -97,8 +97,31 @@ UcieLink::UcieTxPort::UcieTxPort(const std::string& name, UcieLink *owner) :
 
 bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt) 
 {
-    // Stub: When the other chiplet replies, just say "Yes, I got it"
-    return true; 
+    // Check if the response is one of our custom ACK/NAK packets
+    UcieFlitPacket* respFlit = dynamic_cast<UcieFlitPacket*>(pkt);
+
+    if (respFlit != nullptr) {
+        if (respFlit->isNak) {
+            warn("SENDER: Received NAK for Flit %d! Retransmitting from buffer...", respFlit->sequenceNumber);
+        
+            // Re-fire the flit sitting at the front of the retry buffer
+            if(!owner->d2dAdapter.txRetryBuffer.empty()) {
+                UcieFlitPacket* retryFlit = owner->d2dAdapter.txRetryBuffer.front();
+                sendTimingReq(retryFlit);
+            }
+        } else {
+            warn("SENDER: Received ACK for Flit %d! Clearing from buffer.", respFlit->sequenceNumber);
+
+            // Success! We can permantely remove the flit from the retry buffer
+            if(!owner->d2dAdapter.txRetryBuffer.empty()) {
+                owner->d2dAdapter.txRetryBuffer.pop_front();
+            }
+        }
+
+        delete respFlit;    // Clean up the ACK/NAK message container
+    }
+
+    return true;
 }
 void UcieLink::UcieTxPort::recvReqRetry() {
     // Week 3 Task: If the other chiplet was busy, it calls this when it's free.
