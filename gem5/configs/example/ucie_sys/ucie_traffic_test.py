@@ -16,7 +16,7 @@ system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', fl
 system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
 
 # The RAM on Die B
-system.mem_ctrl = SimpleMemory(range=system.mem_ranges[0])
+system.mem_ctrl = SimpleMemory(range=system.mem_ranges[0], latency='1ns')
 
 # 3. Wire the Pipeline End-to-End
 # TrafficGen -> Chiplet A -> Chiplet B -> Memory
