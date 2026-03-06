@@ -103,6 +103,33 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
 void UcieLink::UcieTxPort::recvReqRetry() {
     // Week 3 Task: If the other chiplet was busy, it calls this when it's free.
     // Here, we will pull the next flit from the retryBuffer and send it again.
+    warn("PORT WAKEUP: The adjacent component is free. Resuming transmission...");
+
+    // Scenario 1: We are Chiplet B and have unpacked TLPs waiting for Memory
+    while(!owner->d2dAdapter.rxBuffer.empty()) {
+        PacketPtr frontPkt = owner->d2dAdapter.rxBuffer.front();
+        bool success = sendTimingReq(frontPkt);
+
+        if (success) {
+            owner->d2dAdapter.rxBuffer.pop_front();
+        } else {
+            return; // Memory got busy again. Exit and wait for the next wakeup.
+        }
+    }
+
+    // Scenario 2: We are Chiplet A and have packed Flits waiting for Chiplet B
+    while (!owner->d2dAdapter.txRetryBuffer.empty())
+    {
+        UcieFlitPacket* frontFlit = owner->d2dAdapter.txRetryBuffer.front();
+        bool success = sendTimingReq(frontFlit);
+
+        if (success) {
+            owner->d2dAdapter.txRetryBuffer.pop_front();    // Temporary instant-Ack
+        } else {
+            return; // Chiplet B got busy again. Exit and wait for the next wakeup.
+        }
+    }
+    
 }
 
 // ==========================================================
