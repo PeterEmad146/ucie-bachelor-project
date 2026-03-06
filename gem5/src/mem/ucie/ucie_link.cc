@@ -114,7 +114,10 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
 
             // Success! We can permantely remove the flit from the retry buffer
             if(!owner->d2dAdapter.txRetryBuffer.empty()) {
-                owner->d2dAdapter.txRetryBuffer.pop_front();
+                // Success! Pull the good flit out of the buffer and permanently delete it
+                UcieFlitPacket* goodFlit = owner->d2dAdapter.txRetryBuffer.front();
+                owner->d2dAdapter.txRetryBuffer.pop_back();
+                delete goodFlit;    // <--- SENDER safely deletes the memory!
             }
         }
 
