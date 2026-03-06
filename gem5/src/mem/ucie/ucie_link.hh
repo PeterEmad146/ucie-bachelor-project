@@ -23,10 +23,11 @@ class UcieFlitPacket : public Packet
     public:
         uint64_t sequenceNumber;    // We will use this next for the Ack/Nak retry buffer
         std::vector<PacketPtr> originalPackets; // The original TLPs packed inside this flit
-
+        bool isNak; // Flag to indicate if this is a NAK (true) or ACK (false)
+        
         // Constructor creates a new packet of the specified flit size
-        UcieFlitPacket(RequestPtr req, MemCmd cmd, uint32_t flit_size, uint64_t seq_num)
-            : Packet (req, cmd, flit_size), sequenceNumber(seq_num)
+        UcieFlitPacket(RequestPtr req, MemCmd cmd, uint32_t flit_size, uint64_t seq_num, bool is_nak = false)
+            : Packet (req, cmd, flit_size), sequenceNumber(seq_num), isNak(is_nak)
         {
             allocate(); // Allocate the physical 256 bytes in the simulator's memory
         }
