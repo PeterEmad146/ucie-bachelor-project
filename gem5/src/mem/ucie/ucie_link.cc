@@ -288,25 +288,13 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 
             // 2. Attempt to send the flit across the physical wire via the TX Port!
             // (We pass 'packedFlit', which inherits from Packet, so the port accepts it)
+            warn("SENDER: Flit %d transmitted! Waiting for ACK/NAK...", packedFlit->sequenceNumber);
             bool success = owner->txPort.sendTimingReq(packedFlit);
 
             if (!success) {
                 warn("SENDER: Transmission failed! The adjacent chiplet is busy. Flit remains in buffer for retry.");
                 // We leave the flit in the txRetryBuffer. We will try again later
                 // when the other chiplet calls recvReqRetry().
-            } else {
-                warn("SENDER: Flit %d transmitted! Waiting for ACK/NAK...", packedFlit->sequenceNumber);
-                // WE DELETED THE INSTANT POP_FRONT() HACK!
-                // The flit safely stays in the txRetryBuffer until we hear back.
-                // warn("SENDER: Flit successfully transmitted across the UCIe link!");
-
-                // // TEMPORARY BUFFER FIX:
-                // // Because we haven't written the reverse Ack signal yet, we will
-                // // instantly clear the buffer upon a successful transmission so it 
-                // // doesn't grow to infinity!
-                // owner->d2dAdapter.txRetryBuffer.pop_front();
-                // warn("SENDER: Flit removed. Buffer currently holds %d flit(s).",
-                //     owner->d2dAdapter.txRetryBuffer.size());
             }
         }
     }
