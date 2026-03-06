@@ -172,7 +172,12 @@ AddrRangeList UcieLink::UcieRxPort::getAddrRanges() const
 { 
     // Return an empty list until we start mapping specific memory addresses
     // to the chiplet interconnect space.
-    return AddrRangeList(); 
+    // return AddrRangeList(); 
+
+    // We act as a transparent interconnect! We ask whatever is connected
+    // to our TX Port (like the memory module) what addresses it supports,
+    // and we pass that answer back up to the CPU.
+    return owner->txPort.getAddrRanges();
 }
 
 } // namespace gem5
