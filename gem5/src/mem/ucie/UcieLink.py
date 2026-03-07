@@ -30,3 +30,4 @@ class UcieLink(ClockedObject):
     flit_size = Param.Int(256, "UCIe Flit Size in Bytes")
     link_width = Param.Int(16, "Link Width in Lanes")
     data_rate = Param.String('16GT/s', "Data Rate per pin")
+    error_rate = Param.Float(0.1,"Probability of a CRC error causing a NAK")
