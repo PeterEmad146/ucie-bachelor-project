@@ -116,6 +116,37 @@ UcieLink::UcieLink(const UcieLinkParams &p) :
     errorRate = p.error_rate;
 }
 
+void UcieLink::regStats()
+{
+    ClockedObject::regStats();  // Initialize the base class stats first
+
+    totalFlitsSent
+        .name(name() + ".totalFlitsSent")
+        .desc("Total number of UCIe flits successfully transmitted");
+    
+    totalTLPsSent
+        .name(name() + ".totalTLPsSent")
+        .desc("Total number of original TLPs encapsulated and transmitted");
+
+    totalPayloadBytes
+        .name(name() + ".totalPayloadBytes")
+        .desc("Total valid payload bytes transmitted");
+    
+    totalPaddingBytes
+        .name(name() + ".totalPaddingBytes")
+        .desc("Total wasted padding bytes transmitted");
+    
+    totalCrcErrors
+        .name(name() + ".totalCrcErrors")
+        .desc("Total number of CRC errors (NAKs) injected");
+    
+    // gem5 Formulas are brilliant-they calculate math automatically at the end!
+    payloadEfficiency
+        .name(name() + ".payloadEfficiency")
+        .desc("Ration of valid payload to total flit data capacity")
+        = totalPayloadBytes / (totalPayloadBytes + totalPaddingBytes);
+}
+
 // gem5 calls this function when parsing the Python script (e.g., system.chiplet_A.tx_port)
 // to figure out which physical C++ port object to connect the wire to. 
 Port &
@@ -167,7 +198,7 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
             if(!owner->d2dAdapter.txRetryBuffer.empty()) {
                 // Success! Pull the good flit out of the buffer and permanently delete it
                 UcieFlitPacket* goodFlit = owner->d2dAdapter.txRetryBuffer.front();
-                owner->d2dAdapter.txRetryBuffer.pop_back();
+                owner->d2dAdapter.txRetryBuffer.pop_front();
                 delete goodFlit;    // <--- SENDER safely deletes the memory!
             }
         }
@@ -195,16 +226,11 @@ void UcieLink::UcieTxPort::recvReqRetry() {
     }
 
     // Scenario 2: We are Chiplet A and have packed Flits waiting for Chiplet B
-    while (!owner->d2dAdapter.txRetryBuffer.empty())
+    if (!owner->d2dAdapter.txRetryBuffer.empty())
     {
         UcieFlitPacket* frontFlit = owner->d2dAdapter.txRetryBuffer.front();
-        bool success = sendTimingReq(frontFlit);
-
-        if (success) {
-            owner->d2dAdapter.txRetryBuffer.pop_front();    // Temporary instant-Ack
-        } else {
-            return; // Chiplet B got busy again. Exit and wait for the next wakeup.
-        }
+        sendTimingReq(frontFlit);
+        // We do not pop the buffer here. We wait for the ACK!
     }
     
 }
@@ -243,6 +269,9 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 
         if (crcFailed) {
             warn("RECEIVER: [CRC ERROR] Flit %d corrupted! Sending NAK.", incomingFlit->sequenceNumber);
+
+            // Increment the error counter
+            owner->totalCrcErrors++;
 
             // Create a NAK response (Notice we pass 'true' at the end)
             UcieFlitPacket* nakPkt = new UcieFlitPacket(
@@ -346,13 +375,20 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
                 packedFlit->originalPackets.size(),
                 packedFlit->payloadBytes,
                 owner->txPacker.maxPayloadSize - packedFlit->payloadBytes);
+
+            // Record all the traffic statistics!
+            owner->totalFlitsSent++;
+            owner->totalTLPsSent += packedFlit->originalPackets.size();
+            owner->totalPayloadBytes += packedFlit->payloadBytes;
+            owner->totalPaddingBytes += (owner->txPacker.maxPayloadSize - packedFlit->payloadBytes);
+
             bool success = owner->txPort.sendTimingReq(packedFlit);
 
             if (!success) {
-                warn("SENDER: Transmission failed! The adjacent chiplet is busy. Flit remains in buffer for retry.");
+                warn("SENDER: Transmission failed! Flit %d remains in buffer for retry.", packedFlit->sequenceNumber);
                 // We leave the flit in the txRetryBuffer. We will try again later
                 // when the other chiplet calls recvReqRetry().
-            }
+            } 
         }
     }
 
