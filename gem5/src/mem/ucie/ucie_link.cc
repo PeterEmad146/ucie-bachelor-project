@@ -15,35 +15,82 @@ FlitPacker::FlitPacker(uint32_t flit_size)
 
 UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt) 
 {
-    // 1. Add the incoming TLP to our temporary staging buffer
-    stagingBuffer.push_back(pkt);
-    currentBytes += pkt->getSize();
+    // // 1. Add the incoming TLP to our temporary staging buffer
+    // stagingBuffer.push_back(pkt);
+    // currentBytes += pkt->getSize();
 
-    // 2. Check if we have accumulated enough bytes to form a complete Flit
-    if (currentBytes >= maxPayloadSize) {
+    // // 2. Check if we have accumulated enough bytes to form a complete Flit
+    // if (currentBytes >= maxPayloadSize) {
 
-        // We have enough data! Create a dummy request for the new Flit
+    //     // We have enough data! Create a dummy request for the new Flit
+    //     RequestPtr flitReq = std::make_shared<Request>(
+    //         pkt->getAddr(), targetFlitSize, 0, pkt->req->requestorId()
+    //     );
+
+    //     // Create the custom UcieFlitPacket (Inheriting from base Packet)
+    //     UcieFlitPacket* flit = new UcieFlitPacket(
+    //         flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false
+    //     );
+
+    //     // Move all the stored TLPs into the new Flit container
+    //     flit->originalPackets = stagingBuffer;
+
+    //     // Reset the staging buffer for the next batch of data
+    //     stagingBuffer.clear();
+    //     currentBytes = 0;
+
+    //     // Return the fully packed Flit so it can be transmitted
+    //     return flit;
+    // }
+
+    // // Not enough data yet. Return nullptr and wait for the next TLP.
+    // return nullptr;
+
+    UcieFlitPacket* flit = nullptr;
+
+    // 1. Does this new packet fit in our remaining 236B payload space?
+    if (currentBytes + pkt->getSize() > maxPayloadSize) {
+        // NO! It overflows. We must seal and transmit the CURRENT buffer right now.
+
         RequestPtr flitReq = std::make_shared<Request>(
             pkt->getAddr(), targetFlitSize, 0, pkt->req->requestorId()
         );
 
-        // Create the custom UcieFlitPacket (Inheriting from base Packet)
-        UcieFlitPacket* flit = new UcieFlitPacket(
-            flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false
-        );
-
-        // Move all the stored TLPs into the new Flit container
+        flit = new UcieFlitPacket(flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false);
         flit->originalPackets = stagingBuffer;
 
-        // Reset the staging buffer for the next batch of data
-        stagingBuffer.clear();
-        currentBytes = 0;
+        // Record EXACTLY how many real bytes are in this flit
+        flit->payloadBytes = currentBytes;
 
-        // Return the fully packed Flit so it can be transmitted
+        // Clear the buffer, and put the new packet in as the first item of the NEXT flit
+        stagingBuffer.clear();
+        stagingBuffer.push_back(pkt);
+        currentBytes = pkt->getSize();
+
         return flit;
     }
 
-    // Not enough data yet. Return nullptr and wait for the next TLP.
+    // 2. YES! It fits perfectly. Add it to the buffer. 
+    stagingBuffer.push_back(pkt);
+    currentBytes += pkt->getSize();
+
+    // 3. Did it happen to fill the 236B perfectly?
+    if (currentBytes == maxPayloadSize) {
+        RequestPtr flitReq = std::make_shared<Request>(
+            pkt->getAddr(), targetFlitSize, 0, pkt->req->requestorId()
+        );
+
+        flit = new UcieFlitPacket(flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false);
+        flit->originalPackets = stagingBuffer;
+        flit->payloadBytes = currentBytes;
+
+        stagingBuffer.clear();
+        currentBytes = 0;
+        
+        return flit;
+    }
+
+    // 4. It fit, but we still have space left over. Wait for more TLPs!
     return nullptr;
 }
 
@@ -291,7 +338,11 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 
             // 2. Attempt to send the flit across the physical wire via the TX Port!
             // (We pass 'packedFlit', which inherits from Packet, so the port accepts it)
-            warn("SENDER: Flit %d transmitted! Waiting for ACK/NAK...", packedFlit->sequenceNumber);
+            warn("SENDER: Flit %d transmitted! Contains %d TLPs. [Payload: %d B | Padding: %d B | Protocol: 20B]. Waiting for ACK/NAK...", 
+                packedFlit->sequenceNumber,
+                packedFlit->originalPackets.size(),
+                packedFlit->payloadBytes,
+                owner->txPacker.maxPayloadSize - packedFlit->payloadBytes);
             bool success = owner->txPort.sendTimingReq(packedFlit);
 
             if (!success) {

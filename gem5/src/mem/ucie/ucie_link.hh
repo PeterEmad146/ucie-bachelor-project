@@ -25,9 +25,11 @@ class UcieFlitPacket : public Packet
         std::vector<PacketPtr> originalPackets; // The original TLPs packed inside this flit
         bool isNak; // Flag to indicate if this is a NAK (true) or ACK (false)
         
+        uint32_t payloadBytes;  // Track the exact number of real TLP bytes inside the flit!
+
         // Constructor creates a new packet of the specified flit size
         UcieFlitPacket(RequestPtr req, MemCmd cmd, uint32_t flit_size, uint64_t seq_num, bool is_nak = false)
-            : Packet (req, cmd, flit_size), sequenceNumber(seq_num), isNak(is_nak)
+            : Packet (req, cmd, flit_size), sequenceNumber(seq_num), isNak(is_nak), payloadBytes(0)
         {
             allocate(); // Allocate the physical 256 bytes in the simulator's memory
         }
@@ -38,14 +40,13 @@ class FlitPacker
 {
     private:
         uint32_t targetFlitSize;
-        uint32_t maxPayloadSize;    // The 236 payload limit
         uint32_t currentBytes;
         uint64_t nextSequenceNumber;
         std::vector<PacketPtr> stagingBuffer;   // Temporarily holds TLPs until we reach 256B
 
     public:
         FlitPacker(uint32_t flit_size);
-
+        uint32_t maxPayloadSize;    // The 236 payload limit
         // Accepts an incoming TLP. Returns a UcieFlitPacket if 256B is reached 
         // otherwise returns nullptr (meaning it's still waiting for more data)
         UcieFlitPacket* processIncomingTLP(PacketPtr pkt);
