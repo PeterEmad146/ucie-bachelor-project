@@ -8,6 +8,7 @@
 #include "mem/port.hh"
 #include "mem/packet.hh"
 #include <deque>
+#include "base/statistics.hh"
 
 namespace gem5 
 {
@@ -123,9 +124,20 @@ class UcieLink : public ClockedObject
         FlitPacker txPacker;
         double errorRate;
 
+        // The Data Collectors
+        statistics::Scalar totalFlitsSent;
+        statistics::Scalar totalTLPsSent;
+        statistics::Scalar totalPayloadBytes;
+        statistics::Scalar totalPaddingBytes;
+        statistics::Scalar totalCrcErrors;
+        statistics::Formula payloadEfficiency;  // Automatically calculates % efficiency
+
     public:
         // Constructor that takes the auto-generated Python parameters.
         UcieLink(const UcieLinkParams &p);
+
+        // The statistics Registration Function
+        void regStats() override;
 
         // Required by gem5 to wire the ports together during initialization
         Port &getPort(const std::string &if_name, PortID idx = InvalidPortID) override;
