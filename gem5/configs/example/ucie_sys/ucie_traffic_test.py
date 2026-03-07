@@ -12,8 +12,8 @@ system.mem_ranges = [AddrRange('512MB')] # Required for the Traffic Generator
 system.tgen = TrafficGen(config_file="configs/example/ucie_sys/tgen.cfg")
 
 # The UCIe Interconnect
-system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
-system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256)
+system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256, error_rate=0.5)
+system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256, error_rate=0.5)
 
 # The RAM on Die B
 system.mem_ctrl = SimpleMemory(range=system.mem_ranges[0], latency='1ns', bandwidth='100GB/s')
