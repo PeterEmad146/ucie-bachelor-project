@@ -119,6 +119,7 @@ class UcieLink : public ClockedObject
 
         // Instantiate the FlitPacker
         FlitPacker txPacker;
+        double errorRate;
 
     public:
         // Constructor that takes the auto-generated Python parameters.

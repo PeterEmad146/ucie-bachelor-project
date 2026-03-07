@@ -63,6 +63,7 @@ UcieLink::UcieLink(const UcieLinkParams &p) :
     d2dAdapter.flitSize = p.flit_size;
     logicalPhy.linkWidth = p.link_width;
     logicalPhy.linkLatency = p.link_latency;
+    errorRate = p.error_rate;
 }
 
 // gem5 calls this function when parsing the Python script (e.g., system.chiplet_A.tx_port)
@@ -185,8 +186,10 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         // RECEIVER LOGIC (E.g., Chiplet B handling an incoming Flit)
         // ==========================================================
 
-        // ERROR Injection (10% Chance of Failure)
-        bool crcFailed = (rand() % 10 == 0);
+        // ERROR Injection (Dynamic Python Parameter)
+        // Generates a float between 0.0 and 1.0, and checks if it's less than our errorRate
+        bool crcFailed = ((float)rand()/RAND_MAX) < owner->errorRate;
+
 
         if (crcFailed) {
             warn("RECEIVER: [CRC ERROR] Flit %d corrupted! Sending NAK.", incomingFlit->sequenceNumber);
