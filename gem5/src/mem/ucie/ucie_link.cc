@@ -11,7 +11,7 @@ namespace gem5
 
 // Initialize the packer with the size from Python (e.g., 256 Bytes)
 FlitPacker::FlitPacker(uint32_t flit_size)
-    : targetFlitSize(flit_size), currentBytes(0), nextSequenceNumber(0) {}
+    : targetFlitSize(flit_size), maxPayloadSize(flit_size-20), currentBytes(0), nextSequenceNumber(1) {}
 
 UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt) 
 {
@@ -20,7 +20,7 @@ UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt)
     currentBytes += pkt->getSize();
 
     // 2. Check if we have accumulated enough bytes to form a complete Flit
-    if (currentBytes >= targetFlitSize) {
+    if (currentBytes >= maxPayloadSize) {
 
         // We have enough data! Create a dummy request for the new Flit
         RequestPtr flitReq = std::make_shared<Request>(
@@ -29,7 +29,7 @@ UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt)
 
         // Create the custom UcieFlitPacket (Inheriting from base Packet)
         UcieFlitPacket* flit = new UcieFlitPacket(
-            flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++
+            flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false
         );
 
         // Move all the stored TLPs into the new Flit container

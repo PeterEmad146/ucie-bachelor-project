@@ -38,6 +38,7 @@ class FlitPacker
 {
     private:
         uint32_t targetFlitSize;
+        uint32_t maxPayloadSize;    // The 236 payload limit
         uint32_t currentBytes;
         uint64_t nextSequenceNumber;
         std::vector<PacketPtr> stagingBuffer;   // Temporarily holds TLPs until we reach 256B
