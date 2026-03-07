@@ -11,7 +11,10 @@ namespace gem5
 
 // Initialize the packer with the size from Python (e.g., 256 Bytes)
 FlitPacker::FlitPacker(uint32_t flit_size)
-    : targetFlitSize(flit_size), maxPayloadSize(flit_size-20), currentBytes(0), nextSequenceNumber(1) {}
+    : targetFlitSize(flit_size), 
+      currentBytes(0), 
+      nextSequenceNumber(1), 
+      maxPayloadSize(flit_size-20) {}
 
 UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt) 
 {
