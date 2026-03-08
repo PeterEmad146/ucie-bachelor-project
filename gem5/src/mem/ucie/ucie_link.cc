@@ -106,7 +106,16 @@ UcieLink::UcieLink(const UcieLinkParams &p) :
     // to the base class to avoid the deprecated ownership warnings!
     txPort(name() + ".tx_port", this),
     rxPort(name() + ".rx_port", this),
-    txPacker(p.flit_size)
+    txPacker(p.flit_size),
+
+    // Modern gem5 Statistics Initialization
+    totalFlitsSent(this, "totalFlitsSent", "Total number of UCIe flits successfully transmitted"),
+    totalTLPsSent(this, "totalTLPsSent", "Total number of original TLPs encapsulated and transmitted"),
+    totalPayloadBytes(this, "totalPayloadBytes", "Total valid payload bytes transmitted"),
+    totalPaddingBytes(this, "totalPaddingBytes", "Total wasted padding bytes transmitted"),
+    totalCrcErrors(this, "totalCrcErrors", "Total number of CRC errors (NAKs) injected"),
+    payloadEfficiency(this, "payloadEfficiency", "Ratio of valid payload to total flit data capacity")
+
 {
     // Map the Python parameters to our C++ structs
     d2dAdapter.retryBufferCapacity = p.retry_buffer_capacity;
@@ -114,38 +123,12 @@ UcieLink::UcieLink(const UcieLinkParams &p) :
     logicalPhy.linkWidth = p.link_width;
     logicalPhy.linkLatency = p.link_latency;
     errorRate = p.error_rate;
+
+    // Define the math for the formula
+    payloadEfficiency = totalPayloadBytes / (totalPayloadBytes + totalPaddingBytes);
 }
 
-void UcieLink::regStats()
-{
-    ClockedObject::regStats();  // Initialize the base class stats first
 
-    totalFlitsSent
-        .name(name() + ".totalFlitsSent")
-        .desc("Total number of UCIe flits successfully transmitted");
-    
-    totalTLPsSent
-        .name(name() + ".totalTLPsSent")
-        .desc("Total number of original TLPs encapsulated and transmitted");
-
-    totalPayloadBytes
-        .name(name() + ".totalPayloadBytes")
-        .desc("Total valid payload bytes transmitted");
-    
-    totalPaddingBytes
-        .name(name() + ".totalPaddingBytes")
-        .desc("Total wasted padding bytes transmitted");
-    
-    totalCrcErrors
-        .name(name() + ".totalCrcErrors")
-        .desc("Total number of CRC errors (NAKs) injected");
-    
-    // gem5 Formulas are brilliant-they calculate math automatically at the end!
-    payloadEfficiency
-        .name(name() + ".payloadEfficiency")
-        .desc("Ration of valid payload to total flit data capacity")
-        = totalPayloadBytes / (totalPayloadBytes + totalPaddingBytes);
-}
 
 // gem5 calls this function when parsing the Python script (e.g., system.chiplet_A.tx_port)
 // to figure out which physical C++ port object to connect the wire to. 

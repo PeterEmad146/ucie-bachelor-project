@@ -136,9 +136,6 @@ class UcieLink : public ClockedObject
         // Constructor that takes the auto-generated Python parameters.
         UcieLink(const UcieLinkParams &p);
 
-        // The statistics Registration Function
-        void regStats() override;
-
         // Required by gem5 to wire the ports together during initialization
         Port &getPort(const std::string &if_name, PortID idx = InvalidPortID) override;
         // Called right before the simuation starts ticking
