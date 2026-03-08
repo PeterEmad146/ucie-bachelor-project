@@ -191,6 +191,7 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
 
     return true;
 }
+
 void UcieLink::UcieTxPort::recvReqRetry() {
     // Week 3 Task: If the other chiplet was busy, it calls this when it's free.
     // Here, we will pull the next flit from the retryBuffer and send it again.
@@ -218,6 +219,13 @@ void UcieLink::UcieTxPort::recvReqRetry() {
     
 }
 
+void UcieLink::UcieTxPort::recvRangeChange()
+{
+    // When the memory controller tells our TX port its address ranges,
+    // we immediately pass that information backward out of our RX port!
+    owner->rxPort.sendRangeChange();
+}
+
 // ==========================================================
 // RECEIVE PORT (RX) METHODS
 // ==========================================================
@@ -232,7 +240,8 @@ Tick UcieLink::UcieRxPort::recvAtomic(PacketPtr pkt)
 
 void UcieLink::UcieRxPort::recvFunctional(PacketPtr pkt) 
 {
-    // Instantaneous debug access (does nothing to simulated time)
+    // Instantly forward the backdoor memory load directly to the memory controller
+    owner->txPort.sendFunctional(pkt);    
 }
 
 bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt) 

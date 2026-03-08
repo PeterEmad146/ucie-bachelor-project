@@ -72,6 +72,8 @@ class UcieLink : public ClockedObject
                 bool recvTimingResp(PacketPtr pkt) override;
                 // Called when the adjacent chiplet is full and tells us to back off
                 void recvReqRetry() override;
+                // Listen for memory address map updates
+                void recvRangeChange() override;
         };
 
         // Receive Port (Slave/Receiver)
