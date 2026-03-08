@@ -66,6 +66,12 @@ process.cmd = [binary]
 system.cpu.workload = process
 system.cpu.createThreads()
 
+# X86 explicitly requires an interrupt controller
+system.cpu.createInterruptController()
+system.cpu.interrupts[0].pio = system.cpu_bus.mem_side_ports
+system.cpu.interrupts[0].int_requestor = system.cpu_bus.cpu_side_ports
+system.cpu.interrupts[0].int_responder = system.cpu_bus.mem_side_ports
+
 system.workload = SEWorkload.init_compatible(binary)
 
 # ==========================================================
