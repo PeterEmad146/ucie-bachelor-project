@@ -179,7 +179,7 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
 
     if (respFlit != nullptr) {
         if (respFlit->isNak) {
-            warn("SENDER: Received NAK for Flit %d! Retransmitting from buffer...", respFlit->sequenceNumber);
+            // warn("SENDER: Received NAK for Flit %d! Retransmitting from buffer...", respFlit->sequenceNumber);
         
             // Re-fire the flit sitting at the front of the retry buffer
             if(!owner->d2dAdapter.txRetryBuffer.empty()) {
@@ -187,7 +187,7 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
                 sendTimingReq(retryFlit);
             }
         } else {
-            warn("SENDER: Received ACK for Flit %d! Clearing from buffer.", respFlit->sequenceNumber);
+            // warn("SENDER: Received ACK for Flit %d! Clearing from buffer.", respFlit->sequenceNumber);
 
             // Success! We can permantely remove the flit from the retry buffer
             if(!owner->d2dAdapter.txRetryBuffer.empty()) {
@@ -199,15 +199,19 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
         }
 
         delete respFlit;    // Clean up the ACK/NAK message container
+        return true;
     }
 
-    return true;
+    // STANDARD MEMORY RESPONSE (e.g., Read Data returning to CPU)
+    // If it is NOT and ACK/NAK, it must be actual data returning from the DDR4.
+    // We instantly route it backward out of our RX Port so it reached the CPU!
+    return owner->rxPort.sendTimingResp(pkt);
 }
 
 void UcieLink::UcieTxPort::recvReqRetry() {
     // Week 3 Task: If the other chiplet was busy, it calls this when it's free.
     // Here, we will pull the next flit from the retryBuffer and send it again.
-    warn("PORT WAKEUP: The adjacent component is free. Resuming transmission...");
+    // warn("PORT WAKEUP: The adjacent component is free. Resuming transmission...");
 
     // Scenario 1: We are Chiplet B and have unpacked TLPs waiting for Memory
     while(!owner->d2dAdapter.rxBuffer.empty()) {
@@ -272,7 +276,7 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 
 
         if (crcFailed) {
-            warn("RECEIVER: [CRC ERROR] Flit %d corrupted! Sending NAK.", incomingFlit->sequenceNumber);
+            // warn("RECEIVER: [CRC ERROR] Flit %d corrupted! Sending NAK.", incomingFlit->sequenceNumber);
 
             // Increment the error counter
             owner->totalCrcErrors++;
@@ -293,8 +297,8 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         }
 
 
-        warn("RECEIVER: Got a UCIe Flit! Sequence Number: %d. Unpacking %d TLPs...",
-            incomingFlit->sequenceNumber, incomingFlit->originalPackets.size());
+        // warn("RECEIVER: Got a UCIe Flit! Sequence Number: %d. Unpacking %d TLPs...",
+            // incomingFlit->sequenceNumber, incomingFlit->originalPackets.size());
         
         // // Loop through the flit and extracts the original 64-Byte packets
         // for (PacketPtr originalTLP : incomingFlit->originalPackets) {
@@ -339,8 +343,8 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
                 owner->d2dAdapter.rxBuffer.pop_front();
             } else {
                 // Memory rejected it! We stop trying and wait for a wake-up call.
-                warn("RECEIVER: Memory is busy! Leaving remaining %d TLP(s) in RX Buffer.",
-                    owner->d2dAdapter.rxBuffer.size());
+                // warn("RECEIVER: Memory is busy! Leaving remaining %d TLP(s) in RX Buffer.",
+                    // owner->d2dAdapter.rxBuffer.size());
                 break;
             }
         }
@@ -363,22 +367,22 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         if (packedFlit != nullptr) {
             // SUCCESS! We formed a complete 256B Flit.
             // We print a debug message to prove it worked.
-            warn("SENDER: Created new UCIe Flit! Sequence Number: %d, Contains %d original TLPs.",
-                packedFlit->sequenceNumber, packedFlit->originalPackets.size());
+            // warn("SENDER: Created new UCIe Flit! Sequence Number: %d, Contains %d original TLPs.",
+                // packedFlit->sequenceNumber, packedFlit->originalPackets.size());
             
             // (Next task: Push this flit into the Ack/Nak Retry Buffer and send it)
             // 1. Store a copy in the Retry Buffer in case we need to resent it
             owner->d2dAdapter.txRetryBuffer.push_back(packedFlit);
-            warn("SENDER: Flit added to Retry Buffer. Buffer currently holds %d flit(s).",
-                owner->d2dAdapter.txRetryBuffer.size());
+            // warn("SENDER: Flit added to Retry Buffer. Buffer currently holds %d flit(s).",
+                // owner->d2dAdapter.txRetryBuffer.size());
 
             // 2. Attempt to send the flit across the physical wire via the TX Port!
             // (We pass 'packedFlit', which inherits from Packet, so the port accepts it)
-            warn("SENDER: Flit %d transmitted! Contains %d TLPs. [Payload: %d B | Padding: %d B | Protocol: 20B]. Waiting for ACK/NAK...", 
-                packedFlit->sequenceNumber,
-                packedFlit->originalPackets.size(),
-                packedFlit->payloadBytes,
-                owner->txPacker.maxPayloadSize - packedFlit->payloadBytes);
+            // warn("SENDER: Flit %d transmitted! Contains %d TLPs. [Payload: %d B | Padding: %d B | Protocol: 20B]. Waiting for ACK/NAK...", 
+                // packedFlit->sequenceNumber,
+                // packedFlit->originalPackets.size(),
+                // packedFlit->payloadBytes,
+                // owner->txPacker.maxPayloadSize - packedFlit->payloadBytes);
 
             // Record all the traffic statistics!
             owner->totalFlitsSent++;
@@ -389,7 +393,7 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
             bool success = owner->txPort.sendTimingReq(packedFlit);
 
             if (!success) {
-                warn("SENDER: Transmission failed! Flit %d remains in buffer for retry.", packedFlit->sequenceNumber);
+                // warn("SENDER: Transmission failed! Flit %d remains in buffer for retry.", packedFlit->sequenceNumber);
                 // We leave the flit in the txRetryBuffer. We will try again later
                 // when the other chiplet calls recvReqRetry().
             } 
