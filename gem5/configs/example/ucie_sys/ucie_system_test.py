@@ -17,12 +17,20 @@ system.mem_ranges = [AddrRange('512MB')]
 # 4. Create the CPU (A cycle-accurate Timing CPU)
 system.cpu = X86TimingSimpleCPU()
 
+# Create L1 Caches to burst 64-Byte blocks across the UCIe link
+system.cpu.icache = Cache(size='32kB', assoc=2, tag_latency=2, data_latency=2, response_latency=2, mshrs=4, tgts_per_mshr=20)
+system.cpu.dcache = Cache(size='32kB', assoc=2, tag_latency=2, data_latency=2, response_latency=2, mshrs=4, tgts_per_mshr=20)
+
 # 5. Create a System Crossbar (Bus) to merge CPU Instruction & Data ports
 system.cpu_bus = SystemXBar()
 
-# Wire the CPU to the Bus
-system.cpu.icache_port = system.cpu_bus.cpu_side_ports
-system.cpu.dcache_port = system.cpu_bus.cpu_side_ports
+# Wire the CPU to the Caches
+system.cpu.icache.cpu_side = system.cpu.icache_port
+system.cpu.dcache.cpu_side = system.cpu.dcache_port
+
+# Wire the Caches to the Bus
+system.cpu.icache.mem_side = system.cpu_bus.cpu_side_ports
+system.cpu.dcache.mem_side = system.cpu_bus.cpu_side_ports
 
 # 6. INSTANTIATE CUSTOM UCIE CHIPLETS
 # Setting a realistic 1% error rate for standard operation
