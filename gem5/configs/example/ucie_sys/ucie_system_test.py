@@ -26,8 +26,8 @@ system.cpu.dcache_port = system.cpu_bus.cpu_side_ports
 
 # 6. INSTANTIATE CUSTOM UCIE CHIPLETS
 # Setting a realistic 1% error rate for standard operation
-system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256, error_rate=0.01)
-system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256, error_rate=0.01)
+system.chiplet_A = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256, error_rate=0.0)
+system.chiplet_B = UcieLink(link_latency='2ns', retry_buffer_capacity='32kB', flit_size=256, error_rate=0.0)
 
 # 7. WIRE THE INTERCONNECT PIPELINE
 # CPU Bus -> Chiplet A (TX) -> Chiplet B (RX) -> Memory
@@ -38,6 +38,9 @@ system.chiplet_A.tx_port = system.chiplet_B.rx_port
 system.mem_ctrl = MemCtrl()
 system.mem_ctrl.dram = DDR4_2400_16x4()
 system.mem_ctrl.dram.range = system.mem_ranges[0]
+
+# Tell the DRAM it is a 512MB stick to stop the warning
+system.mem_ctrl.dram.device_size = '512MB'
 
 # Wire Chiplet B to the Memory Controller
 system.chiplet_B.tx_port = system.mem_ctrl.port
