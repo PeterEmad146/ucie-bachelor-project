@@ -49,8 +49,6 @@ UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt)
     // // Not enough data yet. Return nullptr and wait for the next TLP.
     // return nullptr;
 
-    UcieFlitPacket* flit = nullptr;
-
     // 1. Does this new packet fit in our remaining 236B payload space?
     if (currentBytes + pkt->getSize() > maxPayloadSize) {
         // NO! It overflows. We must seal and transmit the CURRENT buffer right now.
@@ -59,7 +57,7 @@ UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt)
             pkt->getAddr(), targetFlitSize, 0, pkt->req->requestorId()
         );
 
-        flit = new UcieFlitPacket(flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false);
+        UcieFlitPacket* flit = new UcieFlitPacket(flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false);
         flit->originalPackets = stagingBuffer;
 
         // Record EXACTLY how many real bytes are in this flit
@@ -77,24 +75,38 @@ UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt)
     stagingBuffer.push_back(pkt);
     currentBytes += pkt->getSize();
 
-    // 3. Did it happen to fill the 236B perfectly?
-    if (currentBytes == maxPayloadSize) {
-        RequestPtr flitReq = std::make_shared<Request>(
-            pkt->getAddr(), targetFlitSize, 0, pkt->req->requestorId()
-        );
+    // 3. INSTANT FLUSH: We no longer wait to fill the 236B!
+    // The CPU is block waiting for this request, so we transmit immeidately.
+    RequestPtr flitReq = std::make_shared<Request>(
+        pkt->getAddr(), targetFlitSize, 0, pkt->req->requestorId()
+    );
 
-        flit = new UcieFlitPacket(flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false);
-        flit->originalPackets = stagingBuffer;
-        flit->payloadBytes = currentBytes;
+    UcieFlitPacket* flit = new UcieFlitPacket(flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false);
+    flit->originalPackets = stagingBuffer;
+    flit->payloadBytes = currentBytes;
 
-        stagingBuffer.clear();
-        currentBytes = 0;
+    stagingBuffer.clear();
+    currentBytes = 0;
+    return flit;
+
+    // // 3. Did it happen to fill the 236B perfectly?
+    // if (currentBytes == maxPayloadSize) {
+    //     RequestPtr flitReq = std::make_shared<Request>(
+    //         pkt->getAddr(), targetFlitSize, 0, pkt->req->requestorId()
+    //     );
+
+    //     flit = new UcieFlitPacket(flitReq, MemCmd::WriteReq, targetFlitSize, nextSequenceNumber++, false);
+    //     flit->originalPackets = stagingBuffer;
+    //     flit->payloadBytes = currentBytes;
+
+    //     stagingBuffer.clear();
+    //     currentBytes = 0;
         
-        return flit;
-    }
+    //     return flit;
+    // }
 
-    // 4. It fit, but we still have space left over. Wait for more TLPs!
-    return nullptr;
+    // // 4. It fit, but we still have space left over. Wait for more TLPs!
+    // return nullptr;
 }
 
 // ==========================================================
