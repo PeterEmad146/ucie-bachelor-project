@@ -479,7 +479,7 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 
 void UcieLink::UcieRxPort::recvRespRetry() 
 {
-    // Stub
+    owner->txPort.sendRetryResp();
 }
 
 AddrRangeList UcieLink::UcieRxPort::getAddrRanges() const 

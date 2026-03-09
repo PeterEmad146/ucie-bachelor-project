@@ -2,7 +2,7 @@
 #include <vector>
 
 // 128x128 matrix generates thousands of memory requests
-#define SIZE 128
+#define SIZE 32
 
 int main() {
 
