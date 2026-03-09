@@ -51,6 +51,9 @@ class FlitPacker
         // Accepts an incoming TLP. Returns a UcieFlitPacket if 256B is reached 
         // otherwise returns nullptr (meaning it's still waiting for more data)
         UcieFlitPacket* processIncomingTLP(PacketPtr pkt);
+
+        UcieFlitPacket* forceFlush();
+        bool hasData() const { return currentBytes > 0; }
 };
 
 
@@ -134,6 +137,11 @@ class UcieLink : public ClockedObject
         statistics::Scalar totalCrcErrors;
         statistics::Formula payloadEfficiency;  // Automatically calculates % efficiency
 
+        // The 8-Cycle Timer Mechanism
+        void processFlushEvent();
+        EventFunctionWrapper flushEvent;
+        void transmitFlit(UcieFlitPacket* flit);    // Helper function to keep code clean
+
     public:
         // Constructor that takes the auto-generated Python parameters.
         UcieLink(const UcieLinkParams &p);
@@ -147,4 +155,4 @@ class UcieLink : public ClockedObject
 
 } // namespace gem5
 
-#endif  // __UCIE_UCIE_LINK_HH__
+#endif  // __UCIE_UCIE_LINK_HH_ 
