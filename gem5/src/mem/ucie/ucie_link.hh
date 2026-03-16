@@ -297,6 +297,33 @@ class UcieFlitPacket : public Packet
         }
 };
 
+// ================================================================================
+//  SECTION 4 - CRC ENGINE
+//
+//  The CRC engine is stateless (pure computation) so it is modelle as a 
+//  namespace of free functions rather than a class. The implementation in
+//  UcieLink.cc uses a pre-computed lookup table for performance.
+//
+//  UCIe uses standard CRC-32 (polynomial 0x04C11DB7, reflected) applied
+//  independently to each 64-byte group within the flit.
+// ================================================================================
+namespace UcieCRC
+{
+    // Compute CRC-32 over [data, data+length]
+    uint32_t compute (const uint8_t* data, size_t length);
+
+    // Populate the four crcGroups fields of a flit before transmission
+    void generateFlitCRC(UcieFlitPacket* flit);
+
+    // Verify crcGroups against flit payload; sets flit-crcValid
+    // Returns true if all groups pass, false on any failure 
+    bool verifyFlitCRC(UcieFlitPacket* flit);
+}
+
+
+
+
+
 };
 
 #endif
