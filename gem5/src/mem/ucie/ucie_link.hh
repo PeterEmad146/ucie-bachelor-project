@@ -372,6 +372,73 @@ class UcieCreditManager
         void reset();
 };
 
+// ================================================================================
+//  SECTION 6 - FLIT PACKER ENGINE (D2D Adapter TX path)
+//
+//  The FlitPacker accumulates incoming gem5 Packets (Protocol Layer TLPs)
+//  into 256-byte UCIe flits. It respects the 236-byte payload limit and 
+//  handles two packing triggers:
+//
+//      a) Payload Full : staging buffer reaches 236B -> immediate flush
+//      b) Timer Flush  : 8-cycle timeout fires -> partial flit with padding
+//
+//  TLP Segmentation:
+//      If a single TLP exceeds 236B it is split: the first 236B go into one flit
+//      (isFirstSegment=true), remaining bytes fill subsequent flits 
+//      (isMiddleSegment=true / isLastSegment=true on the last segment).
+//
+//  Reference: [REF-PAPER] SS 3.2 "Flit Assembly and Padding Analysis"
+// ================================================================================
+class FlitPacker
+{
+    public:
+        //  6.1     Configuration (set during UcieLink construction)
+        const uint32_t flitSize;        // Always 256 (UCIE_FLIT_SIZE_BYTES)
+        const uint32_t maxPayloadSize;  // Always 236 (UCIE_PAYLOAD_SIZE_BYTES)
+
+        //  Constructor
+        explicit FlitPacker(uint32_t flit_size= UCIE_FLIT_SIZE_BYTES);
+
+        //  6.2     Primary Interface
+
+        // Accept one incoming TLP from the Protocol Layer.
+        // If the staging buffer fills to 236B or the TLP exactly fits:
+        //      Returns a fully-packed UcieFlitPacket* ready for CRC + transmission.
+        // Otherwise:
+        //      Stores TLP in staging buffer and returns nullptr (more data needed).
+        // Large TLPs (> 236B) produce on flit immediately and re-queue remainder.
+        UcieFlitPacket* processIncomingTLP(PacketPtr pkt);
+
+        // Flush the staging buffer unconditionally with padding.
+        // Called by the 8-cycle timer event in UcieLink.
+        // Returns nullptr if staging buffer is empty (nothing to flush).
+        UcieFlitPacket* forceFlush();
+
+        // True when there is at least one byte in the staging buffer
+        bool hasData() const { return currentBytes > 0; }
+
+        // How many payload bytes are currently staged
+        uint32_t stagedBytes() const { return currentBytes; }
+
+        // Reset sequence numbering (called on link reset / retrain)
+        void resetSequenceCounter() { nextSequenceNumber = 0; }
+
+    private:
+        //  6.3     Internal State
+        uint32_t                currentBytes;           // Bytes accumulated in staging
+        uint8_t                 nextSequenceNumber;     // Next flit seq num (7-bit, wraps)
+        std::vector<PacketPtr>  stagingBuffer;          // TLPs waiting to be packed
+        std::vector<uint8_t>    segementResidue;        // Leftover bytes from a segement TLP
+
+        //  6.4     Internal Helpers
+
+        // Build a UcieFlitPacket from whatever is currently in stagingBuffer.
+        // Applies padding, sets segmentation flags, advances sequence counter.
+        UcieFlitPacket* assembleFlit(bool isPartial);
+
+        // Assign the next 7-bit sequence number (wraps at UCIE_MAX_SEQ_NUM)
+        uint8_t assignSequenceNumber();
+};
 
 
 };
