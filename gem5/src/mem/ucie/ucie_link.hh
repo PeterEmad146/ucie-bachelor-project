@@ -320,7 +320,57 @@ namespace UcieCRC
     bool verifyFlitCRC(UcieFlitPacket* flit);
 }
 
+// ================================================================================
+//  SECTION 5 - CREDIT MANAGER
+//
+//  UCIe uses a credit-based flow control scheme at the D2D adapter layer.
+//  Two orthogonal credit pools exist:
+//      * Header Credits    - permission to send one flit header (one TLP)
+//      * Data Credits      - permission to send on 4-byte unit of TLP payload
+//
+//  Credits are initialized during link training (MBTRAIN state) and returned 
+//  by the receiver piggybacked on outgoing flits (via header fields
+//  headerCreditsReturned / dataCreditsReturned).
+//
+//  This class tracks credit state for one direction of the link.
+// ================================================================================
+class UcieCreditManager
+{
+    public:
+        // Per-message-class credit pools
+        // Index: 0 = NPR, 1 = PR, 2 = CPL (MessageClass enum values)
+        static constexpr int NUM_MSG_CLASSES = 3;
 
+        struct CreditPool {
+            uint32_t txAvailable;   // Credits this side may consume for TX
+            uint32_t rxGranted;     // Credits this side has granted to remote TX
+            uint32_t rxConsumed;    // Credits consumed by received flits (not yet returned)
+        };
+
+        std::array<CreditPool, NUM_MSG_CLASSES> pools;
+
+        // Header credit initial values set during link training
+        // (negotiated; typical initial value = 8 per message class)
+        static constexpr uint32_t INITIAL_HEADER_CREDITS    = 8;
+        static constexpr uint32_t INITIAL_DATA_CREDITS      = 32;   // in 4B units
+
+        // API used by UcieLink
+        UcieCreditManager();
+
+        // Returns true if at least one header credit + enough data credits are 
+        // available to transmit a packet of payloadBytes bytes.
+        bool canSend(MessageClass cls, uint32_t payloadBytes) const;
+
+        // Deduct credits when scheduling a flit for transmission
+        void consumeCredits(MessageClass cls, uint32_t payloadBytes);
+
+        // Called when a received flit's header carries credit return fields
+        void returnCredits(uint8_t headerCreds, uint8_t dataCreds,
+                           MessageClass cls);
+
+        // Initialize pools to spec-defined initial values
+        void reset();
+};
 
 
 
