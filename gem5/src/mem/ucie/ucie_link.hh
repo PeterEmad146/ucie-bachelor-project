@@ -472,7 +472,275 @@ class FlitUnpacker
         uint32_t                expectedTotalBytes; // Size of the TLP being assembled
 };
 
+// ================================================================================
+//  SECTION 8 - UCIe LINK MAIN CONTROLLER
+//
+//  UcieLink is the top-level gem5 ClockedObject that modles one direction of
+//  the UCIe stack. It wires together all sub-components and implements:
+//      * gem5 timing port callbacks (send / receive)
+//      * Link state machine transitions
+//      * 8-cycle flit assembly timer
+//      * Retry buffer management (ACK / NAK processing)
+//      * Credit tracking (via UcieCreditManager)
+//      * gem5 statistics collection
+//
+// ================================================================================
+class UcieLink : public ClockedObject
+{
+    private:
+        //  8.1     BIDIRECTIONAL PORTS
+
+        // TX Port - sends packed flits to the adjacent chiplet 
+        // (gem5 RequestPort: this side initiates the memory transaction)
+        class UcieTxPort : public RequestPort
+        {
+            private:
+                UcieLink* owner;
+            public:
+                UcieTxPort(const std::string& name, UcieLink* owner);
+
+                // Called when hte far-end chiplet sends a response (ACK/NAK flit)
+                bool recvTimingResp(PacketPtr pkt) override;
+
+                // Called when the far-end was busy and now has capacity again
+                void recvReqRetry() override;
+
+                // Address range changes from the far side
+                void recvRangeChange() override;
+        };
+
+        // RX Port - receives TLPs from the local chiplet's protocol stack
+        // (gem5 ResponsePort: this side resopnds to memory transactions)
+        class UcieRxPort : public ResponsePort
+        {
+            private:
+                UcieLink* owner;
+            public:
+                UcieRxPort(const std::string& name, UcieLink* owner);
+
+                // Backdoor / zero-latency access (functional simulation mode)
+                Tick recvAtomic(PacketPtr pkt) override;
+                void recvFunctional(PacketPtr pkt) override;
+
+                // Main timing path: a TLP arrives from the local protocol stack
+                bool recvTimingReq(PacketPtr pkt) override;
+
+                // Flow control retry: called when we can accept more packets
+                void recvRespRetry() override;
+
+                // Memory address space this port is responsible for
+                AddrRangeList getAddrRanges() const override;
+        };
+
+        //  8.2     UCIe D2D ADAPTER SUB-MODULE 
+        struct D2DAdapter
+        {
+            // Flit sizing (spec-mandated, duplicated here for clarity)
+            static constexpr uint32_t FLIT_SIZE     = UCIE_FLIT_SIZE_BYTES;     // 256
+            static constexpr uint32_t PAYLOAD_SIZE  = UCIE_PAYLOAD_SIZZE_BYTES; // 236
+
+            // Retry Buffer
+            // Holds every transmitted flit until an ACK is received.
+            // On Nak: all flits from NAK.seqNum onwards are retransmitted.
+            // Capacity = retryBufferCapacity (configured at construction).
+            uint32_t retryBufferCapacity;   // Max flits held pending ACK
+            std::deque<UcieFlitPacket*> txRetryBuffer;
+
+            // Highest ACK's sequence number (flits <= this value may be retired)
+            uint8_t lastAckedSeqNum;
+
+            // RX Buffer - holds unpacked TLPs waiting to be forwarded to memory
+            std::deque<PacketPtr> rxBuffer;
+            uint32_t rxBufferMaxDepth;  // Configurable; controls back-pressure
+
+            // Credit Manager
+            UcieCreditManager creditManager;
+
+            // Chiplet Addressing 
+            uint8_t localChipletID;     // This chiplet's ID (0..255)
+            uint8_t remoteChipletID;    // Target chiplet's ID (0..255)
+        } d2dAdapter;
+
+        //  8.3     UCIe LOGICAL PHY SUB-MODULE
+        //  Modles the lane-level physical parameters without transistor-level detail.
+        //  Reference: UCIe Spec (Physical Layer) and (Logical PHY).
+        struct LogicalPhy
+        {
+            // Link width in lanes: 2, 4, 8, 16 (Standard) or 64 (Advanced)
+            int     linkWidth;
+
+            // Data rate in Gbps per lane (Standard: up to 32 GT/s; Advanced: 32 GT/s)
+            double  dataRateGbps;
+
+            // Point-to-point propagation delay (Tick = gem5 simulator time unit)
+            Tick    linkLatency;
+
+            // Effective bandwidth in bytes/tick = (linkWidth x dataRateGbps) / 8
+            // Computed once during init() and cached here
+            double effectiveBandwidthBytesPerTick;
+        } logicalPhy;
+
+        //  8.4     SUB-COMPONENT INSTANCES
+        //
+        //  Constructor init-list order:
+        //      txPort -> rxPort -> txPacker -> errorRate -> txBlocked ->
+        //      phyLinkState -> currentLinkState -> flushTimerCycles ->
+        //      flushEventPending -> flushEvent -> stats
+        UcieTxPort      txPort;     // 1 - TX Port (must be before rxPort)
+        UcieRxPort      rxPort;     // 2
+        FlitPacker      txPacker;   // 3 - flit assembly engine
+        FlitUnpacker    rxUnpacker; // 4 - (default-constructed, order flexible)
+
+        // Simulated bit-error rate applied on each transmitted flit
+        // (0.0 = error-free; e.g., 1e-9 = one bit error per billion bits)
+        double errorRate;           // 5
+        
+        //  8.5     FLIT TRANSMISSION PIPELINE (continued)
+
+        // True when the downstream port is busy (credit or port backpressure)
+        bool txBlocked;             // 6
+
+        //  8.6     STATE MACHINES 
+        //
+        //  UCIe is hierarchical: Physical Layer state must be advanced BEFORE
+        //  the Adapter LSM can request the equivalent state. Both are tracked
+        //  independently so the model can enforce this gating.
+        //
+        //  Declaraction AFTER txBlocked (position 6) to match init-list position 7.
+
+        // Physical Layer training state 
+        PhyLinkState    phyLinkState;   // 7a - tracks 9-state PHY machine
+
+        // Adapter LSM state - gates data transmission
+        AdapterLinkState currentLinkState;  // 7b - gates flit flow in ACTIVE only
+
+        //  State transition helpers
+        
+        // Advance Physical Layer training sequence (RESET->SBINIT->ACTIVE)
+        void transitionPhyState(PhyLinkState newState);
+
+        // Advance Adapter LSM (gated: phyLinkState must be >= equivalent level)
+        void transitionLinkState(AdapterLinkState newState);
+
+        // Physical Layer initialization substeps
+        void handleSbInit();        // SBINIT: sideband detection & repair
+        void handleMbInit();        // MBINIT: mainband init at 4 GT/s
+        void handleMbTrain();       // MBTRAIN: spead ramp + clock centering
+        void handleLinkInit();      // LINKINIT: adapter parameter exchange
+
+        // Runtime state transitions
+        void triggerPhyRetrain();   // Enter PHYRETRAIN -> MBTRAIN -> .. -> ACTIVE
+        void triggerRetrain();      // Ender Adapter RETRAIN (Gated by PHY retrain)
+        void triggerLinkError();    // Enter LINKERROR (highest priority)
+        void triggerLinkReset();    // Enter LINKRESET (hot reset flow)
+        void enterPowerManagement(bool deepSleep);  // Enter L1 (false) or L2 (true)
+        void exitPowerManagement(); // Return to ACTIVE from L1/L2
+
+        //  8.7     TX SEND QUEUE AND HELPERS
+        //  (Not in the initializer list - default-constructed; order flexible).
+
+        // Queue of fully-assembled, CRC-stamped flits awaiting port bandwidth
+        std::deque<UcieFlitPacket*> txSendQueue;
+
+        // Attempt to drain txSendQueue through txPort; respects credit limits
+        void drainTxSendQueue();
+
+        // Apply CRC + inject simulated errors + push flit into txSendQueue
+        void transmitFlit(UcieFlitPacket* flit);
+
+        //  8.8     ACK / NAK PROCESSING 
+        
+        // Retires all txRetryBuffer entries with seqNum <= ackedSeqNum
+        void processAck(uint8_t ackedSeqNum);
+
+        // Retransmits all txRetryBuffer entries with seqNum >= nakSeqNum
+        void processNak(uint8_t nakSeqNum);
+
+        // Generate and send an ACK flit piggybacked with credit returns
+        void sendAck(uint8_t ackedSeqNum);
+
+        // Generate and send a NAK flit for a CRC-failed received flit
+        void sendNak(uint8_t nakSeqNum);
+
+        //  8.8     8-CYCLE FLIT ASSEMBLY TIMER 
+        //
+        //  If the staging buffer is non-empty but has not filled to 236B within 
+        //  flushTimerCycles clock cycles, this event fires to force a partial
+        //  flit flush with padding, bounding maximum TLP latency.
+        void processFlushEvent();
+
+        // Number of cycles before a partial flit is force-flushed
+        // (spec-recommended default: 8; configurable via Python parameter)
+        Tick flushTimerCycles;              // 8
+        
+        // True when flushEvent has been scheduled not yet fired
+        bool flushEventPending;             // 9
+
+        // The gem5 event object - declared LAST in this group because its 
+        // constructor lambda captures 'this'; all members it touched must
+        // already exist when the EventFunctionWrapper is constructed.
+        EventFunctionWrapper flushEvent;    // 10
+
+        //  8.9     GEM5 STATISTICS 
+        //
+        //  The reference paper evaluates the UCIe model using these key metrics:
+        //      * Flit packing efficiencey  = payload / (payload + padding)
+        //      * Retransmission rate       = retransmitted flits / total flits
+        //      * CRC error rate            = errored flits / total flits
+        //      * Effective throughput      = payload bytes / simulation time
+        struct UcieStats : public statistics::Group
+        {
+            // Constructor wires stats into gem5's statistics framework
+            UcieStats(UcieLink* parent);
+
+            //  TX Path
+            statistics::Scalar totalFlitsSent;          // All flits pushed to txPort
+            statistics::Scalar totalTLPsSent;           // Original TLPs packed
+            statistics::Scalar totalPayloadBytes;       // Real TLP bytes transmitted
+            statistics::Scalar totalPaddingBytes;       // Zero=padding bytes added
+            statistics::Scalar totalRetransmissions;    // Flits resent due to NAK
+            statistics::Scalar totalFlitsNaked;         // Naks received from remote
+
+            //  RX Path
+            statistics::Scalar totalFlitsReceived;      // Flits received from txPort
+            statistics::Scalar totalCrcErrors;          // Flits failing CRC check
+            statistics::Scalar totalAcksSent;           // ACK flits generated
+            statistics::Scalar totalNaksSent;           // NAK flits generated
+
+            //  Derived metrics (Formula = auto-computed from Scalars)
+            statistics::Formula payloadEfficiency;      // totalPayloadBytes / (totalPayloadBytes + totalPaddingBytes)
+            statistics::Formula retransmissionRate;     // totalRetransmissions / totalFlitsSent
+            statistics::Formula crcErrorRate;           // totalCrcError / totalFlitsReceived
+        } stats;
+
+    public:
+        //  8.10        PUBLIC INTERFACE - gem5 ClockedObject API
+
+        // Construct from Python-generated parameter struct (UcieLink.py -> SCons)
+        explicit UcieLink(const UcieLinkParams& p);
+
+        // gem5 port wiring - called by Python simulation script
+        Port& getPort(const std::string& if_name,
+                      PortID idx = InvalidPortID) override;
+        
+        // Called by gem5 just before simulation starts; validates config and 
+        // schedules initial link training events
+        void init() override;
+
+        //  8.11    DIAGNOSTIC / DEBUG API
+
+        // Print current link state and credit pools to std::cout
+        void dumpLinkStatus() const;
+
+        // Return current Physical Layer state
+        PhyLinkState getPhyState() const { return phyLinkState; }
+        
+        // Return current Adapter LSM state (controls flit gating)
+        AdapterLinkState getLinkState() const { return currentLinkState; }
 
 };
 
-#endif
+
+} // end namespace gem5
+
+#endif // __UCIE_UCIE_LINK_HH__
