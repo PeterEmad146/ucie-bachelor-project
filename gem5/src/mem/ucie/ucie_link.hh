@@ -440,6 +440,38 @@ class FlitPacker
         uint8_t assignSequenceNumber();
 };
 
+// ================================================================================
+//  SECTION 7 - FLIT UNPACKER ENGINE (D2D Adapter RX path)
+//
+//  The FlitUnpacker is the receive-side complement of FlitPacker. It:
+//      1. Accepts a received UcieFlitPacket*
+//      2. Verifies the CRC (delegates to UcieCRC::verifyFlitCRC
+//      3. Extracts individual TLPs from the payload, respecting segmentation
+//      4. Reassembles multi-flit segmented TLPs
+//      5. Forwards complete TLPs to the protocol layer (rxBuffer in D2DAdapter)
+//      6. Generates ACK or NAK flit for the sender
+// ================================================================================
+class FlitUnpacker
+{
+    public:
+        explicit FlitUnpacker() = default;
+
+        //  7.1     Primary Interface
+
+        // Process on received flit.
+        // Returns a list of complete TLPs extracted from the flit.
+        // If CRC fails, returns empty list (caller must generate NAK).
+        std::vector<PacketPtr> processReceivedFlit(UcieFlitPacket* flit);
+
+        // True if we are mid-way through reassembling a segmented TLP
+        bool hasPartialTLP() const { return !reassemblyBuffer.empty(); }
+
+    private:
+        //  7.2     Segmented TLP Reassembly Buffer
+        std::vector<uint8_t>    reassemblyBuffer;   // Raw bytes of teh in-progress TLP
+        uint32_t                expectedTotalBytes; // Size of the TLP being assembled
+};
+
 
 };
 
