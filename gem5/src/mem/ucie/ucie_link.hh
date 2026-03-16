@@ -214,9 +214,89 @@ struct UcieFlitHeader
     {}
 };
 
+// ================================================================================
+//  SECTION 3 - UCIe FLIT PACKET    (256-byte Atomic Transfer Unit)
+//
+//  UcieFlitPacket inherits from gem5's Packet to integrate cleanly with the 
+//  gem5 timing memory system. It extends Packet with UCIe-specific metadata:
+//  the flit header, CRC storage, and references to the original TLPs packed
+//  inside this flit (needed for retransmission and unpack operations).
+//
+//  CRC Note: UCIe uses a per -64B CRC group scheme, producing 4 x CRC-32
+//  values stored in the 12-byte CRC field (three 32-bit words are used;
+//  the fourth 32-bit word stores link-level status bits).
+// ================================================================================
 
+//  Fixed flit dimensions - spec-mandated constants
+static constexpr uint32_t UCIE_FLIT_SIZE_BYTES      = 256;  // Total flit size
+static constexpr uint32_t UCIE_HEADER_SIZE_BYTES    = 8;    // Flit header
+static constexpr uint32_t UCIE_CRC_SIZE_BYTES       = 12;   // CRC field
+static constexpr uint32_t UCIE_PAYLOAD_SIZZE_BYTES  =
+    UCIE_FLIT_SIZE_BYTES - UCIE_HEADER_SIZE_BYTES - UCIE_CRC_SIZE_BYTES;    // 236
 
+//  Maximum sequence number before wrap-around (7-bit filed -> 0..127)
+static constexpr uint8_t  UCIE_MAX_SEQ_NUM          = 128;
 
-}
+class UcieFlitPacket : public Packet
+{
+    public:
+        //  3.1     UCIe Protocol Metadata
+        UcieFlitHeader  header;             // 8-byte structured flit header
+        uint32_t        payloadBytes;       // Actual TLP bytes in payload (<= 236)
+        uint32_t        paddingBytes;       // Zero-padding appended to reach 236B
+                                            // paddingBytes = 236 - payloadBytes
+
+        //  3.2     CRC Storage
+        //
+        //  Four CRC-32 values, each covering one 64-byte group of the flit body.
+        //  Groups: [Bytes 0-63], [Bytes 64-127], [Bytes 128-191], [Bytes 192-235]
+        //  Only 3 groups carry data CRC; the 4tn stores link status bits.
+        std::array<uint32_t, 4> crcGroups;  // crcGroups[0..2]  = data CRC
+                                            // crcGroups[3]     = link status
+        
+        //  3.3     Retry Buffer Metadata 
+        uint8_t sequenceNumber;             // 7-bit flit sequence number (0..127)
+        bool    crcValid;                   // True if CRC check passed on receive
+        bool    isRetransmission;           // True if this flit is being replayed
+                                            // from the retry buffer (not first send)
+
+        //  3.4     TLP Provenance - for Unpack & Retry
+        //
+        //  Holds strong references to the original gem5 Packets (TLPs) that were
+        //  packed into this flit. On ACK: packets are retired. On NAK: they are
+        //  repacked and retransmitted from the retry buffer.
+        std::vector<PacketPtr> originalPackets;
+
+        //  3.5     TLP Segmentation Flags
+        //
+        //  A single TLP may exceed 236B and must be split across consecutive flits.
+        //  These flags tell the receiver how to reassemble.
+        bool isFirstSegment;    // This flit begins a segmented TLP
+        bool isLastSegment;     // This flit ends a segemented TLP (may also be first)
+        bool isMiddleSegment;   // Interior segment of a multi-flit TLP
+
+        //  Constructor
+        //  req     - gem5 request object (provides address/command context)
+        //  cmd     - gem5 memory command (typically MemCmd::WriteReq for TX)
+        //  seq_num - flit sequence number assigned by the packer
+        //  type    - flit type classification
+        UcieFlitPacket(RequestPtr req,
+                       MemCmd cmd,
+                       uint8_t seq_num,
+                       FlitType type=FlitType::PROTOCOL)
+            : Packet(req, cmd, UCIE_FLIT_SIZE_BYTES),
+              payloadBytes(0), paddingBytes(0),
+              sequenceNumber(seq_num),
+              crcValid(false), isRetransmission(false),
+              isFirstSegment(true), isLastSegment(true), isMiddleSegment(false)
+        {
+            header.seqNum   = seq_num;
+            header.flitType = type;
+            crcGroups.fill(0);
+            allocate(); // Allocated 256 bytes in gem5's memory pool
+        }
+};
+
+};
 
 #endif
