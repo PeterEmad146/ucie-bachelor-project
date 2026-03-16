@@ -170,7 +170,53 @@ enum class MessageClass : uint8_t
     RSVD    = 3     // Reserved for future extension
 };
 
-}
+// ================================================================================
+//  SECTION 2 - UCIe FLIT HEADER
+//  
+//  Every 256-byte flit begins with an 8-byte header that the D2D Adapter 
+//  constructs and parses. This struct models those 8 bytes with named fields
+//  to avoid error-prone raw bit manipulation in the .cc file.
+//
+//  Byte layout (conceptual - actual packing done by D2D hardware):
+//  
+//      Byte 0  : [7:4] srcID   [3:0] dstID
+//      Byte 1  : [7:4] msgClass    [3:0] protocol
+//      Byte 2  : flitType
+//      Byte 3  : [7:1] SeqNum[6:0] [0] ackNakValid
+//      Byte 4-5: ackNakSeqNum (16-bit, for ACK/NAK responses)
+//      Byte 6  : headerCreditsReturned (TX -> RX credit return for header slots)
+//      Byte 7  : dataCreditsReturned   (TX -> RX credit return for data slots)
+// ================================================================================
+struct UcieFlitHeader
+{
+    uint8_t     srcID;                  // Source chiplet identifier
+    uint8_t     dstID;                  // Destination chiplet identifier
+    MessageClass    msgClass;           // QoS / virtual channel
+    ProtocolType    protocol;           // Protocol stack selector
+    FlitType        flitType;           // Flit category (see enum above)
 
+    uint8_t     seqNum;                 // 7-bit sequence number [0-127]
+                                        // Wraps modulo retryBufferCapacity
+    bool        ackNakValid;            // True when ackNakSeqNum is meaningful
+    uint16_t    ackNakSeqNum;           // Sequence number being ACK'd or NAK'd
+
+    // Credit return fields - piggybacked on every flit 
+    uint8_t     headerCreditsReturned;  // Header credit slots returned to sender
+    uint8_t     dataCreditsReturned;    // Data credit slots returned to sender
+
+    // Default constructor produces a valid NULL flit header
+    UcieFlitHeader()
+        : srcID(0), dstID(0),
+          msgClass(MessageClass::NPR), protocol(ProtocolType::PCIE),
+          flitType(FlitType::NULL_FLIT),
+          seqNum(0), ackNakValid(false), ackNakSeqNum(0),
+          headerCreditsReturned(0), dataCreditsReturned(0)
+    {}
+};
+
+
+
+
+}
 
 #endif
