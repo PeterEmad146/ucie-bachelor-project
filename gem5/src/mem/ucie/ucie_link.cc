@@ -366,6 +366,78 @@ UcieFlitPacket* FlitPacker::forceFlush()
     return assembleFlit(true);
 }
 
+// ================================================================================
+//  FLIT UNPACKER ENGINE (D2D Adapter RX path)
+//
+//  Processes received flits: extracts TLPs, handles multi-flit segmentation
+//  reassembly, and signals to the caller whether CRC passed.
+// ================================================================================
+std::vector<PacketPtr> FlitUnpacker::processReceivedFlit(UcieFlitPacket* flit)
+{
+    assert(flit != nullptr);
+    std::vector<PacketPtr> extractedTLPs;
+
+    // CRC must already be verified by the caller (UcieRxPort::recvTimingReq)
+    if (!flit->crcValid) {
+        warn("[UCIe Unpacker] Flit seq=%u: CRC invalid - dropping payload. "
+             "Caller should issue NAK.", flit->sequenceNumber);
+        return extractedTLPs;     // empty vector signals failure to caller
+    }
+
+    warn("[UCIe Unpacker] Flit seq=%u: Unpacking %zu TLPs "
+         "(payload=%uB, padding=%uB). firstSeg=%s lastSeg=%s.",
+         flit->sequenceNumber,
+         flit->originalPackets.size(),
+         flit->payloadBytes,
+         flit->payloadBytes,
+         flit->paddingBytes,
+         flit->isFirstSegment ? "true" : "false",
+         flit->isLastSegment  ? "true" : "false");
+
+    // Non-segmented flit (most common case): extract all TLPs directly
+    if (flit->isFirstSegment && flit->isLastSegment) {
+        for (PacketPtr tlp : flit->originalPackets) {
+            extractedTLPs.push_back(tlp);
+            warn("[UCIe Unpacker] Extracted TLP addr=0x%llx size=%uB.",
+                 (unsigned long long)tlp->getAddr(), tlp->getSize());
+        }
+        return extractedTLPs;
+    }
+
+    // First segment of a multi-flit TLP: begin reassembly
+    if (flit->isFirstSegment && !flit->isLastSegment) {
+        warn("[UCIe Unpacker] First segment of split TLP received. "
+             "Starting reassembly buffer (%uB).", flit->payloadBytes);
+        const uint8_t* raw = flit->getConstPtr<uint8_t>() + UCIE_HEADER_SIZE_BYTES;
+        reassemblyBuffer.assign(raw, raw + flit->payloadBytes);
+        expectedTotalBytes = 0;     // Will be determined on last segment
+        return extractedTLPs;         // Nothing complete yet
+    }
+
+    // Middle or last segment: append to reassembly buffer
+    if (flit->isMiddleSegment || flit->isLastSegment) {
+        const uint8_t* raw = flit->getConstPtr<uint8_t>() + UCIE_HEADER_SIZE_BYTES;
+        reassemblyBuffer.insert(reassemblyBuffer.end(),
+                                raw, raw + flit->payloadBytes);
+        warn("[UCIe Unpacker] Segment appended. Reassembly buffer now=%zuB. "
+             "Last segment=%s.",
+             reassemblyBuffer.size(),
+             flit->isLastSegment ? "YES" : "NO");
+
+        if (flit->isLastSegment) {
+            // Reassembly complete — the originalPackets in the last flit
+            // holds the reconstructed TLP reference
+            for (PacketPtr tlp : flit->originalPackets) {
+                extractedTLPs.push_back(tlp);
+                warn("[UCIe Unpacker] Reassembled TLP addr=0x%llx size=%uB.",
+                     (unsigned long long)tlp->getAddr(), tlp->getSize());
+            }
+            reassemblyBuffer.clear();
+        }
+    }
+
+    return extractedTLPs;
+}
 
 
 
