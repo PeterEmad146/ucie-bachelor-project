@@ -737,9 +737,7 @@ class UcieLink : public ClockedObject
         
         // Return current Adapter LSM state (controls flit gating)
         AdapterLinkState getLinkState() const { return currentLinkState; }
-
 };
-
 
 } // end namespace gem5
 
