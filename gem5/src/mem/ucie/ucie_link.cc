@@ -367,7 +367,7 @@ UcieFlitPacket* FlitPacker::forceFlush()
 }
 
 // ================================================================================
-//  FLIT UNPACKER ENGINE (D2D Adapter RX path)
+//  S4 FLIT UNPACKER ENGINE (D2D Adapter RX path)
 //
 //  Processes received flits: extracts TLPs, handles multi-flit segmentation
 //  reassembly, and signals to the caller whether CRC passed.
@@ -438,6 +438,152 @@ std::vector<PacketPtr> FlitUnpacker::processReceivedFlit(UcieFlitPacket* flit)
 
     return extractedTLPs;
 }
+
+// ================================================================================
+//  S5 UCIELINK CORE - Constructor, init(), getPort()
+// ================================================================================
+
+// Statistics group constructor
+// gem5 ADD_STAT macro registers each stat with the gem5 statistics engine.
+UcieLink::UcieStats::UcieStats(UcieLink* parent)
+    : statistics::Group(parent),
+      ADD_STAT(totalFlitsSent,       statistics::units::Count::get(),
+               "Total UCIe flits pushed to TX port"),
+      ADD_STAT(totalTLPsSent,        statistics::units::Count::get(),
+               "Total Protocol-Layer TLPs encapsulated and sent"),
+      ADD_STAT(totalPayloadBytes,    statistics::units::Byte::get(),
+               "Total valid TLP payload bytes transmitted"),
+      ADD_STAT(totalPaddingBytes,    statistics::units::Byte::get(),
+               "Total zero-padding bytes added (wasted bandwidth)"),
+      ADD_STAT(totalRetransmissions, statistics::units::Count::get(),
+               "Flits retransmitted due to NAK (Flit-Level Retry)"),
+      ADD_STAT(totalFlitsNaked,      statistics::units::Count::get(),
+               "NAK responses received from remote chiplet"),
+      ADD_STAT(totalFlitsReceived,   statistics::units::Count::get(),
+               "Total UCIe flits received on RX port"),
+      ADD_STAT(totalCrcErrors,       statistics::units::Count::get(),
+               "Received flits that failed CRC verification"),
+      ADD_STAT(totalAcksSent,        statistics::units::Count::get(),
+               "ACK flits generated and sent"),
+      ADD_STAT(totalNaksSent,        statistics::units::Count::get(),
+               "NAK flits generated and sent"),
+      ADD_STAT(payloadEfficiency,    statistics::units::Ratio::get(),
+               "Fraction of flit capacity carrying real TLP data: "
+               "payloadBytes / (payloadBytes + paddingBytes)"),
+      ADD_STAT(retransmissionRate,   statistics::units::Ratio::get(),
+               "Retransmitted flits / total flits sent"),
+      ADD_STAT(crcErrorRate,         statistics::units::Ratio::get(),
+               "CRC-failed flits / total flits received")
+{
+    // Formula stats: computed automatically from scalar accumulators
+    payloadEfficiency  = totalPayloadBytes /
+                         (totalPayloadBytes + totalPaddingBytes);
+    retransmissionRate = totalRetransmissions / totalFlitsSent;
+    crcErrorRate       = totalCrcErrors       / totalFlitsReceived;
+}
+
+// UcieLink Constructor 
+// Maps Python parameters -> C++ sub-module configuraiton.
+// (Python param names come from UcieLink.py processed by SCons)
+UcieLink::UcieLink(const UcieLinkParams& p)
+    : ClockedObject(p),
+      txPort(name() + ".tx_port", this),
+      rxPort(name() + ".rx_port", this),
+      txPacker(p.flit_size),
+      errorRate(p.error_rate),
+      txBlocked(false),
+      phyLinkState(PhyLinkState::RESET),
+      currentLinkState(AdapterLinkState::RESET),
+      flushTimerCycles(p.flush_timer_cycles),
+      flushEventPending(false),
+      flushEvent([this]{ processFlushEvent(); }, name() + ".flushEvent"),
+      stats(this)
+{
+    // D2D Adapter configuration
+    d2dAdapter.retryBufferCapacity  = p.retry_buffer_capacity;
+    d2dAdapter.lastAckedSeqNum      = 0;
+    d2dAdapter.rxBufferMaxDepth     = p.rx_buffer_depth;
+    d2dAdapter.localChipletID       = static_cast<uint8_t>(p.local_chiplet_id);
+    d2dAdapter.remoteChipletID      = static_cast<uint8_t>(p.remote_chiplet_id);
+
+    // Logical PHY configuration
+    logicalPhy.linkWidth    = p.link_width;
+    logicalPhy.dataRateGbps = p.data_rate_gbps;
+    logicalPhy.linkLatency  = p.link_latency;
+
+    // Effective bandwidth = (lanes × Gbps) / 8 bits-per-byte
+    // Expressed as bytes per Tick (Tick = picoseconds in gem5 by default)
+    // dataRateGbps × 1e9 bits/s → bytes/s ÷ 1e12 ticks/s = bytes/tick × 1e3
+    logicalPhy.effectiveBandwidthBytesPerTick =
+        (logicalPhy.linkWidth * logicalPhy.dataRateGbps * 1e9)
+        / (8.0 * 1e12);
+
+    warn("[UCIe Link] Constructed. "
+         "localID=%u remoteID=%u linkWidth=x%d dataRate=%.1fGbps "
+         "latency=%lu ticks flitSize=%uB payloadLimit=%uB "
+         "retryBufCap=%u errorRate=%.2e flushTimer=%lu cycles.",
+         d2dAdapter.localChipletID,
+         d2dAdapter.remoteChipletID,
+         logicalPhy.linkWidth,
+         logicalPhy.dataRateGbps,
+         logicalPhy.linkLatency,
+         p.flit_size,
+         UCIE_PAYLOAD_SIZE_BYTES,
+         d2dAdapter.retryBufferCapacity,
+         errorRate,
+         flushTimerCycles);
+}
+
+// getPort - wires Python-named ports to C++ port objects
+Port& UcieLink::getPort(const std::string& if_name, PortID idx)
+{
+    if (if_name == "tx_port") return txPort;
+    if (if_name == "rx_port") return rxPort;
+    return ClockedObject::getPort(if_name, idx);
+}
+
+// init - pre-simulation sanity checks and link training kickoff
+void UcieLink::init()
+{
+    ClockedObject::init();
+
+    fatal_if(!txPort.isConnected(),
+             "[UCIe Link] TX port '%s.tx_port' is not connected! "
+             "Check your Python topology script.", name());
+    fatal_if(!rxPort.isConnected(),
+             "[UCIe Link] RX port '%s.rx_port' is not connected! "
+             "Check your Python topology script.", name());
+
+    warn("[UCIe Link] init() — ports verified connected.");
+    warn("[UCIe Link] Running full Physical Layer training sequence ");
+
+    // Physical Layer Training Sequence
+    // Fast-forwarded at init time in behavioral model.
+    // In a cycle-accurate model each would be a timed event.
+    transitionPhyState(PhyLinkState::SBINIT);
+    handleSbInit();
+
+    transitionPhyState(PhyLinkState::MBINIT);
+    handleMbInit();
+
+    transitionPhyState(PhyLinkState::MBTRAIN);
+    handleMbTrain();
+
+    transitionPhyState(PhyLinkState::LINKINIT);
+    handleLinkInit();
+
+    transitionPhyState(PhyLinkState::ACTIVE);
+    warn("[UCIe Link] Physical Layer ACTIVE.");
+
+    // Adapter LSM initialization 
+    // Can only enter ACTIVE after PhyLinkState == ACTIVE.
+    transitionLinkState(AdapterLinkState::ACTIVE);
+
+    warn("[UCIe Link] Adapter LSM ACTIVE. Link fully operational. "
+         "localID=%u remoteID=%u x%d @ %.1f GT/s.",
+         d2dAdapter.localChipletID, d2dAdapter.remoteChipletID,
+         logicalPhy.linkWidth, logicalPhy.dataRateGbps);
+}   
 
 
 
