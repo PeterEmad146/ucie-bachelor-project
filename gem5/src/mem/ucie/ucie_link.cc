@@ -191,6 +191,182 @@ void UcieCreditManager::returnCredits(uint8_t headerCreds, uint8_t dataCreds, Me
          idx, headerCreds, dataCreds, pools[idx].txAvailable);
 }
 
+// ================================================================================
+//  S3 FLIT PACKER ENGINE (D2D Adapter TX path)
+//
+//  Implements the flit assembly algorithm described in [REF-PAPER]
+//  Two packing triggers:
+//      a) Payload Full : staged bytes reach UCIE_PAYLOAD_SIZE_BYTES (236B)
+//      b) Timer Flush  : 8-cycle timeout fires -> partial flit with zero-padding
+//
+//  TLP Segmentation:
+//      If a single TLP exceeds 236B it is split. The first 236B fill flit N
+//      (isFirstSegment=true, isLastSegment=false). The remainder is stored in
+//      segmentResidue and prepended to the next flit assembly cycle.
+// ================================================================================
+
+FlitPacker::FlitPacker(uint32_t flit_size)
+    : flitSize(flit_size),
+      maxPayloadSize(flit_size - UCIE_HEADER_SIZE_BYTES - UCIE_CRC_SIZE_BYTES),
+      currentBytes(0),
+      nextSequenceNumber(0)
+{
+    warn("[UCIe Packer] Initialized. flitSize=%uB payloadLimit=%uB "
+         "(header=%uB + CRC=%uB overhead).",
+         flitSize, maxPayloadSize,
+         UCIE_HEADER_SIZE_BYTES, UCIE_CRC_SIZE_BYTES);
+}
+
+// assignSequenceNumber - 7-bit wrapping counter 
+uint8_t FlitPacker::assignSequenceNumber()
+{
+    uint8_t seq = nextSequenceNumber;
+    nextSequenceNumber = (nextSequenceNumber + 1) % UCIE_MAX_SEQ_NUM;
+    return seq;
+}
+
+// assembleFlit - build a UcieFlitPacker from the current staging buffer.
+// isPartial = true when called by forceFlush (timer or overflow).
+// isPartial = false when payload is exactly 236B.
+UcieFlitPacket* FlitPacker::assembleFlit(bool isPartial)
+{
+    assert(!stagingBuffer.empty() || !segementResidue.empty());
+
+    // Use the address of the first packet's request as the flit address
+    RequestPtr flitReq = std::make_shared<Request>(
+        stagingBuffer.empty()
+            ? 0
+            : stagingBuffer.front()->getAddr(),
+        flitSize, 0,
+        stagingBuffer.empty()
+            ? 0
+            : stagingBuffer.front()->req->requestorId()
+    );
+
+    uint8_t seq = assignSequenceNumber();
+
+    UcieFlitPacket* flit = new UcieFlitPacket(
+        flitReq, MemCmd::WriteReq, seq, FlitType::PROTOCOL
+    );
+
+    // Transfer TLPs from staging -> flit
+    flit->originalPackets = stagingBuffer;
+    flit->payloadBytes    = currentBytes;
+    flit->paddingBytes    = maxPayloadSize - currentBytes;
+
+    // Segmentation flags: most flits are single-TLP non-segmented
+    flit->isFirstSegment  = true;
+    flit->isLastSegment   = currentBytes;
+    flit->paddingBytes    = maxPayloadSize - currentBytes;
+
+    // Segmentation flags: most flits are single-TLP non-segmented
+    flit->isFirstSegment  = true;
+    flit->isLastSegment   = segementResidue.empty();    // false if TLP split
+    flit->isMiddleSegment = false;
+
+    // Write zero-padding into the raw flit buffer for correct CRC coverage
+    // getPtr<uint8_t>() - mutable pointer, valid because allocate() was called
+    // in UcieFlitPacket's constructor.
+    uint8_t* rawData = flit->getPtr<uint8_t>();
+    if (flit->paddingBytes > 0) {
+        std::memset(rawData + UCIE_HEADER_SIZE_BYTES + flit->payloadBytes,
+                    0x00, flit->paddingBytes);
+    }
+
+    warn("[UCIe Packer] Assembled flit seq=%u. "
+         "TLPs=%zu payloadBytes=%u paddingBytes=%u partial=%s "
+         "firstSeg=%s lastSeq=%s.",
+         seq,
+         flit->originalPackets.size(),
+         flit->payloadBytes,
+         flit->paddingBytes,
+         isPartial ? "YES" : "NO",
+         flit->isFirstSegment ? "true" : "false",
+         flit->isLastSegment  ? "true" : "false");
+
+    // Reset staging state
+    stagingBuffer.clear();
+    currentBytes = 0;
+
+    return flit;
+}
+
+// processIncoming TLP - main packer entry point
+//
+// Algorithm 
+//      1. If TLP > 236B: split into head (236B) + residue
+//      2. If adding TLP overflows staged bytes: flush current buffer first
+//      3. Add TLP to staging buffer
+//      4. If staging buffer is exactly full: flush immediately
+UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt)
+{
+    warn("[UCIe Packer] Incoming TLP size=%Ub. Currently staged=%uB.",
+         pkt->getSize(), currentBytes);
+
+    UcieFlitPacket* flit = nullptr;
+
+    // Case 1: TLP larger than one full flit payload -> segment it
+    if (pkt->getSize() > maxPayloadSize) {
+        warn("[UCIe Packer] TLP size=%uB exceeds payload limit=%uB. "
+             "Segmenting across multiple flits.", pkt->getSize(), maxPayloadSize);
+
+        // Store the remainder for the next flit assembly cycle
+        // getConstPtr<uint8_t>() - read-only access to the incoming TLP's raw bytes
+        const uint8_t* tlpData = pkt->getConstPtr<uint8_t>();
+        segementResidue.assign(tlpData + maxPayloadSize,
+                               tlpData + pkt->getSize());
+
+        // Stage only the first 236B (we synthesize a partial staging entry)
+        stagingBuffer.push_back(pkt);
+        currentBytes = maxPayloadSize;      // artificially cap at payload limit
+
+        flit = assembleFlit(false);
+        flit->isLastSegment = false;        // more segment follow
+        return flit;
+    }
+
+    // Case 2: Adding this TLP would overflow current staging -> flush first
+    if(currentBytes + pkt->getSize() > maxPayloadSize) {
+        warn("[UCIe Packer] Adding TLP(%uB) would overflow staging(%uB/%uB). "
+             "Flushing current buffer first.",
+             pkt->getSize(), currentBytes, maxPayloadSize);
+        flit = assembleFlit(true);      // flush existing partial buffer
+    }
+
+    // Case 3: Stage the incoming TLP
+    stagingBuffer.push_back(pkt);
+    currentBytes += pkt->getSize();
+
+    // Case 4: Staging buffer is exactly full -> flush immediately
+    if (currentBytes == maxPayloadSize) {
+        warn("[UCIe Packer] Staging buffer full (%uB). Immediate flush.",
+             currentBytes);
+        // Only flush now if we didn't already flush in Case 2
+        if (flit == nullptr) {
+            flit = assembleFlit(false);
+        }
+    }
+
+    return flit;    // nullptr = still accumulating; non-null = flit read
+}
+
+// forceFlush - drain staging buffer unconditionally (timer-triggered).
+// If nothing is staged, returns nullptr.
+UcieFlitPacket* FlitPacker::forceFlush()
+{
+    if (stagingBuffer.empty() && segementResidue.empty()) {
+        warn("[UCIe Packer] forceFlush called but staging buffer is empty. "
+             "Nothing to flush.");
+        return nullptr;
+    }
+
+    warn("[UCIe Packer] forceFlush: sealing partial flit with %uB payload, "
+         "%uB padding.", currentBytes, maxPayloadSize - currentBytes);
+
+    return assembleFlit(true);
+}
+
+
 
 
 } // namespace gem5
