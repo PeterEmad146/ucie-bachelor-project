@@ -585,6 +585,232 @@ void UcieLink::init()
          logicalPhy.linkWidth, logicalPhy.dataRateGbps);
 }   
 
+//  S6 STATE MACHINES
+//
+//  Two independent machines must be advanced in lockstep:
+//      1. PhyLinkStage - Physical Layer (9 states)
+//      2. AdapterLinkStage - Adapter LSM (8 states)
+//
+//  The spec mandates that PhyLinkState must reach a given level BEFORE
+//  the AdapterLinkState can request the equivalent level.
 
+// State name tables for warn() output
+static const char* phyStateNames[] = {
+    "RESET", "SBINIT", "MBINIT", "MBTRAIN",
+    "LINKINIT", "ACTIVE", "L1", "L2", "PHYRETRAIN", "TRAINERROR"
+};
+
+static const char* adapterStateNames[] = {
+    "RESET", "ACTIVE", "RETRAIN", "L1", "L2",
+    "LINKERROR", "LINKRESET", "DISABLED"
+};
+
+// transitionPhyState - advance the Physical Layer training FSM
+void UcieLink::transitionPhyState(PhyLinkState newState)
+{
+    uint8_t oldIdx = static_cast<uint8_t>(phyLinkState);
+    uint8_t newIdx = static_cast<uint8_t>(newState);
+
+    warn("[UCIe PHY State] %s → %s (tick=%lu).",
+         phyStateNames[oldIdx], phyStateNames[newIdx], curTick());
+
+    phyLinkState = newState;
+}
+
+// transitionLinkState - advance the Adapter LSM
+// Enforces: PhyLinkState must be ACTIVE before AdapterLinkState -> ACTIVE
+void UcieLink::transitionLinkState(AdapterLinkState newState)
+{
+    // RDI SM (Physical Layer) must be in Active before Adapter LSM
+    if (newState == AdapterLinkState::ACTIVE &&
+        phyLinkState != PhyLinkState::ACTIVE) {
+        warn("[UCIe Adapter State] BLOCKED: Cannot enter ACTIVE — "
+             "Physical Layer is in %s (must be ACTIVE first).",
+             phyStateNames[static_cast<uint8_t>(phyLinkState)]);
+        return;
+    }
+
+    uint8_t oldIdx = static_cast<uint8_t>(currentLinkState);
+    uint8_t newIdx = static_cast<uint8_t>(newState);
+
+    warn("[UCIe Adapter State] %s → %s (tick=%lu).",
+         adapterStateNames[oldIdx], adapterStateNames[newIdx], curTick());
+
+    currentLinkState = newState;
+}
+
+// handleSbInit - SBINIT: Sideband initialization 
+// Behavioral model: detect sideband, exchange {SBINIT Out of Reset} and
+// {SBINIT done req/resp} messages. Here simulated as an instant pass
+void UcieLink::handleSbInit()
+{
+    warn("[UCIe PHY] SBINIT: Sideband detection and out-of-reset "
+         "message exchange complete (800 MT/s).");
+}
+
+// handleMbInit - MBINIT: Mainband init at 4 GT/s 
+// Credit pools are initialized here - first time the D2D Adapter is
+// active and can negotiate initial credit values.
+void UcieLink::handleMbInit()
+{
+    d2dAdapter.creditManager.reset();
+    warn("[UCIe PHY] MBINIT: Mainband initialized at 4 GT/s. "
+         "On-die calibration complete. Credit pools initialized.");
+}
+
+// handleMbTrain - MBTRAIN: Speed ramp + clock centering 
+void UcieLink::handleMbTrain()
+{
+    warn("[UCIe PHY] MBTRAIN: Mainband speed raised to %.1f GT/s. "
+         "x%d lanes. Clock centering vs data complete. "
+         "Effective BW = %.3f GB/s.",
+         logicalPhy.dataRateGbps,
+         logicalPhy.linkWidth,
+         logicalPhy.linkWidth * logicalPhy.dataRateGbps / 8.0);
+}
+
+// handleLinkInit - LINKINIT: Adapter & protocol parameter exchange
+// This is the state where UCIe Flit Mode vs Raw Mode, protocol type
+// (PCIe/CXL/Streaming), and credit initial values are negotiated.
+void UcieLink::handleLinkInit()
+{
+    warn("[UCIe PHY] LINKINIT: Adapter capabilities and link management "
+         "messages exchanged. Protocol negotiation complete. "
+         "localChiplet=%u remoteChiplet=%u.",
+         d2dAdapter.localChipletID, d2dAdapter.remoteChipletID);
+}
+
+// triggerPhyRetrain - Runtime physical retrain 
+// Spec: "Used to begin the retrain flow for the Link during runtime."
+// After physical retrain, link re-enters ACTIVE via MBTRAIN -> LINKINIT.
+void UcieLink::triggerPhyRetrain()
+{
+    warn("[UCIe PHY] PHYRETRAIN triggered. "
+         "CRC errors=%lu NAKs=%lu. Flushing TX queue (%zu flits).",
+         (unsigned long)stats.totalCrcErrors.value(),
+         (unsigned long)stats.totalFlitsNaked.value(),
+         txSendQueue.size());
+
+    transitionPhyState(PhyLinkState::PHYRETRAIN);
+
+    // Drain send queue — flits retransmitted from retry buffer after retrain
+    while (!txSendQueue.empty()) {
+        delete txSendQueue.front();
+        txSendQueue.pop_front();
+    }
+
+    // Re-run MBTRAIN → LINKINIT → ACTIVE
+    transitionPhyState(PhyLinkState::MBTRAIN);
+    handleMbTrain();
+    transitionPhyState(PhyLinkState::LINKINIT);
+    handleLinkInit();
+    transitionPhyState(PhyLinkState::ACTIVE);
+
+    warn("[UCIe PHY] Physical link back to ACTIVE after PHYRETRAIN.");
+}
+
+// triggerRetrain - Adapter LSM RETRAIN
+// Spec: "RDI SM must be in Retrain BEFORE propagating Retrain to Adapter LSMs."
+// Spec: "All Adapter LSMs in Active must propagate Retrain."
+void UcieLink::triggerRetrain()
+{
+    warn("[UCIe Adapter] Adapter RETRAIN requested. "
+         "Triggering Physical PHYRETRAIN first (spec §3.4 requirement).");
+
+    // Step 1: Physical Layer must enter PHYRETRAIN first
+    triggerPhyRetrain();
+
+    // Step 2: Now Adapter LSM can enter RETRAIN
+    transitionLinkState(AdapterLinkState::RETRAIN);
+
+    warn("[UCIe Adapter] Adapter in RETRAIN. "
+         "Retransmitting from oldest un-ACKed flit in retry buffer.");
+
+    // Step 3: Retransmit from oldest un-ACKed flit
+    if (!d2dAdapter.txRetryBuffer.empty()) {
+        processNak(d2dAdapter.txRetryBuffer.front()->sequenceNumber);
+    }
+
+    // Step 4: Return Adapter LSM to ACTIVE after retrain completes
+    transitionLinkState(AdapterLinkState::ACTIVE);
+}
+
+// triggerLinkError - LINKERROR 
+// Spec: "LinkError transition takes priority over LinkReset or Disabled."
+// Spec: "RDI SM must be in LinkError before Adapter LSM can transition."
+void UcieLink::triggerLinkError()
+{
+    warn("[UCIe Adapter] LINKERROR triggered! "
+         "This overrides any pending LinkReset or Disabled transitions. "
+         "CRC errors=%lu NAKs=%lu.",
+         (unsigned long)stats.totalCrcErrors.value(),
+         (unsigned long)stats.totalFlitsNaked.value());
+
+    transitionPhyState(PhyLinkState::TRAINERROR);
+    transitionLinkState(AdapterLinkState::LINKERROR);
+}
+
+// triggerLinkReset — LINKRESET
+// Spec: "Adapter LSM negotiates LinkReset via sideband with remote partner."
+// Spec: "Disabled takes priority over LinkReset."
+
+void UcieLink::triggerLinkReset()
+{
+    // Guard: LinkError takes priority (spec §3.4)
+    if (currentLinkState == AdapterLinkState::LINKERROR) {
+        warn("[UCIe Adapter] LinkReset IGNORED — LINKERROR has priority.");
+        return;
+    }
+
+    warn("[UCIe Adapter] LINKRESET: Hot reset initiated via sideband. "
+         "Negotiating with remote chiplet %u.",
+         d2dAdapter.remoteChipletID);
+
+    transitionLinkState(AdapterLinkState::LINKRESET);
+    // After sideband negotiation completes (behavioral: immediate), go to RESET
+    transitionLinkState(AdapterLinkState::RESET);
+    transitionPhyState(PhyLinkState::RESET);
+
+}
+
+// enterPowerManagement — L1 or L2 PM state 
+// Spec: "All Adapter LSMs must be in PM before RDI SM is transitioned to PM."
+// Behavioral model: directly gates flit transmission.
+void UcieLink::enterPowerManagement(bool deepSleep)
+{
+    AdapterLinkState pmState = deepSleep
+                               ? AdapterLinkState::L2
+                               : AdapterLinkState::L1;
+    PhyLinkState phyPmState  = deepSleep
+                               ? PhyLinkState::L2
+                               : PhyLinkState::L1;
+
+    warn("[UCIe PM] Entering %s. TX blocked. "
+         "Sideband remains active for PM exit signaling.",
+         deepSleep ? "L2 (deep sleep)" : "L1 (low power)");
+
+    transitionLinkState(pmState);
+    transitionPhyState(phyPmState);
+    txBlocked = true;
+}
+
+//  exitPowerManagement — Return to ACTIVE from L1 or L2
+//  Spec: "Once physical Link is retrained, RDI is in Active, then
+//  Adapter LSM PM exit triggered from both sides via sideband."
+void UcieLink::exitPowerManagement()
+{
+    warn("[UCIe PM] PM exit triggered. Running PHYRETRAIN to restore link.");
+
+    // Physical Layer must retrain back to ACTIVE
+    triggerPhyRetrain();
+
+    // Then Adapter LSM returns to ACTIVE
+    transitionLinkState(AdapterLinkState::ACTIVE);
+
+    txBlocked = false;
+
+    warn("[UCIe PM] PM exit complete. Link ACTIVE. Draining TX queue.");
+    drainTxSendQueue();
+}
 
 } // namespace gem5
