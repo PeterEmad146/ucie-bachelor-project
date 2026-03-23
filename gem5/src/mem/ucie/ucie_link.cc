@@ -938,6 +938,147 @@ void UcieLink::processFlushEvent()
     }
 }
 
+// ================================================================================
+//  S8      ACK/NAK PROCESSING
+// ================================================================================
+
+// processAck - retire all retry buffer entreis upt to and including ackedSeqNum
+void UcieLink::processAck(uint8_t ackedSeqNum)
+{
+    size_t retired = 0;
+
+    while (!d2dAdapter.txRetryBuffer.empty()) {
+        UcieFlitPacket* front = d2dAdapter.txRetryBuffer.front();
+        if (front->sequenceNumber > ackedSeqNum) break;
+
+        warn("[UCIe ACK] Retiring flit seq=%u from retry buffer.",
+             front->sequenceNumber);
+
+        d2dAdapter.txRetryBuffer.pop_front();
+        delete front;   // Sender owns memory; safe to free now
+        ++retired;
+    }
+
+    d2dAdapter.lastAckedSeqNum = ackedSeqNum;
+
+    warn("[UCIe ACK] ACK seq=%u processed. Retired %zu flits. "
+         "Retry buffer depth=%zu.",
+         ackedSeqNum, retired, d2dAdapter.txRetryBuffer.size());
+
+    // Credit returns are piggybacked in the ACK flit header
+    // (handled in recvTimingResp via the flit header fields)
+
+    // Drain any queued flits now that retry buffer has space
+    drainTxSendQueue();
+}
+
+// processNak - retransmit all flits from nakSeqNum onwards
+void UcieLink::processNak(uint8_t nakSeqNum)
+{
+    stats.totalFlitsNaked++;
+
+    warn("[UCIe NAK] NAK received for seq=%u. "
+         "Retransmitting from retry buffer (%zu flits).",
+         nakSeqNum, d2dAdapter.txRetryBuffer.size());
+
+    // Find the NAK'd flit and retransmit from there
+    bool found = false;
+    for (UcieFlitPacket* flit : d2dAdapter.txRetryBuffer) {
+        if (flit->sequenceNumber >= nakSeqNum) {
+            found = true;
+            flit->isRetransmission = true;
+
+            warn("[UCIe NAK] Retransmitting flit seq=%u (originally %zu TLPs).",
+                 flit->sequenceNumber, flit->originalPackets.size());
+
+            // Re-generate CRC and re-send
+            UcieCRC::generateFlitCRC(flit);
+            bool sent = txPort.sendTimingReq(flit);
+            if (!sent) {
+                warn("[UCIe NAK] Retransmit blocked — port busy. "
+                     "Will resume on recvReqRetry.");
+                txBlocked = true;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        warn("[UCIe NAK] WARNING: NAK for seq=%u but not found in retry buffer "
+             "(already ACKed?). Ignoring.", nakSeqNum);
+    }
+}
+
+// sendAck - create and dispatch an ACK flit to the remote chiplet
+// Piggybacks credit returns in the flit header
+void UcieLink::sendAck(uint8_t ackedSeqNum)
+{
+    // ACK flits carry no TLP payload; size = UCIE_FLIT_SIZE_BYTES but
+    // payloadBytes = 0 and all payload bytes are zero-padded.
+    RequestPtr ackReq = std::make_shared<Request>(
+        0, UCIE_FLIT_SIZE_BYTES, 0, 0
+    );
+
+    UcieFlitPacket* ack = new UcieFlitPacket(
+        ackReq, MemCmd::WriteReq, ackedSeqNum, FlitType::FLIT_LEVEL_ACK
+    );
+
+    ack->header.flitType         = FlitType::FLIT_LEVEL_ACK;
+    ack->header.ackNakValid      = true;
+    ack->header.ackNakSeqNum     = ackedSeqNum;
+    ack->header.srcID            = d2dAdapter.localChipletID;
+    ack->header.dstID            = d2dAdapter.remoteChipletID;
+    // Return all consumed credits (simplified: return all pending)
+    ack->header.headerCreditsReturned = 1;
+    ack->header.dataCreditsReturned   =
+        (UCIE_PAYLOAD_SIZE_BYTES + 3) / 4;   // in 4B units
+
+    ack->payloadBytes = 0;
+    ack->paddingBytes = UCIE_PAYLOAD_SIZE_BYTES;
+    ack->makeResponse();
+
+    stats.totalAcksSent++;
+
+    warn("[UCIe ACK] Sending ACK for seq=%u to chiplet %u. "
+         "HdrCredRet=%u DataCredRet=%u.",
+         ackedSeqNum,
+         d2dAdapter.remoteChipletID,
+         ack->header.headerCreditsReturned,
+         ack->header.dataCreditsReturned);
+
+    rxPort.sendTimingResp(ack);
+}
+
+// sendNak - create and dispatch a NAK flit requesting retransmission
+void UcieLink::sendNak(uint8_t nakSeqNum)
+{
+    RequestPtr nakReq = std::make_shared<Request>(
+        0, UCIE_FLIT_SIZE_BYTES, 0, 0
+    );
+
+    UcieFlitPacket* nak = new UcieFlitPacket(
+        nakReq, MemCmd::WriteReq, nakSeqNum, FlitType::FLIT_LEVEL_NAK
+    );
+
+    nak->header.flitType     = FlitType::FLIT_LEVEL_NAK;
+    nak->header.ackNakValid  = true;
+    nak->header.ackNakSeqNum = nakSeqNum;
+    nak->header.srcID        = d2dAdapter.localChipletID;
+    nak->header.dstID        = d2dAdapter.remoteChipletID;
+    nak->payloadBytes        = 0;
+    nak->paddingBytes        = UCIE_PAYLOAD_SIZE_BYTES;
+    nak->makeResponse();
+
+    stats.totalNaksSent++;
+
+    warn("[UCIe NAK] Sending NAK for seq=%u to chiplet %u. "
+         "Requesting retransmission.",
+         nakSeqNum, d2dAdapter.remoteChipletID);
+
+    rxPort.sendTimingResp(nak);
+}
+
+
 
 
 
