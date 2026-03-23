@@ -1170,7 +1170,221 @@ void UcieLink::UcieTxPort::recvRangeChange()
     owner->rxPort.sendRangeChange();
 }
 
+// ================================================================================
+//  S10     RX PORT CALLBACKS
+//  UcieRxPort connects t the LOCAL chiplet's CPU / cache / NoC.
+//  Incoming requests here are either:
+//      a) TLPs from the local protocol stack -> pack into flit -> send
+//      b) Received UCIe flits from the remote -> unpack -> forward to memory
+// ================================================================================
+UcieLink::UcieRxPort::UcieRxPort(const std::string& name, UcieLink* owner)
+    : ResponsePort(name), owner(owner) {}
 
+// recvAtomic - backdoor zero-latency access (functional/ atomic CPU mode)
+Tick UcieLink::UcieRxPort::recvAtomic(PacketPtr pkt)
+{
+    warn("[UCIe RX Port] recvAtomic: addr=0x%llx size=%uB — "
+         "forwarding with %lu tick latency.",
+         (unsigned long long)pkt->getAddr(),
+         pkt->getSize(),
+         owner->logicalPhy.linkLatency);
+
+    return owner->txPort.sendAtomic(pkt) + owner->logicalPhy.linkLatency;
+}
+
+// recvFunctional - backdoor direct memory write (debugging)
+void UcieLink::UcieRxPort::recvFunctional(PacketPtr pkt)
+{
+    warn("[UCIe RX Port] recvFunctional: addr=0x%llx size=%uB — "
+         "bypassing flit layer.",
+         (unsigned long long)pkt->getAddr(), pkt->getSize());
+
+    owner->txPort.sendFunctional(pkt);
+}
+
+// recvTimingReq - MAIN DATA PATH
+//
+// Two roles depending on what arrives:
+// 
+// ROLE A - SENDER (local CPU/cache sends a TLP to the remote chiplet):
+//      Incoming packet is a standard gem5 packet (not UcieFlitPacket).
+//      -> Hand to FlitPacker -> if flit assembled -> transmitFlit()
+//      -> Schedule 8-cycle flush timer if staging buffer has partial data
+//
+// ROLE B - RECEIVER (remote chiplet sent us a packed UCIe flit):
+//      Incoming packet is a UcieFlitPacket (dynamic_cast suceeds).
+//      -> Verify CRC -> ACK or NAK -> unpack TLPs -> forward memory
+bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
+{
+    // Classify the incoming packet
+    UcieFlitPacket* incomingFlit = dynamic_cast<UcieFlitPacket*>(pkt);
+
+    //  ROLE B: Received UCIe Flit from remote chiplet
+    if (incomingFlit != nullptr) {
+
+        owner->stats.totalFlitsReceived++;
+
+        warn("[UCIe RX Port] RECEIVER: Got UCIe flit seq=%u from chiplet %u. "
+             "type=%u payload=%uB.",
+             incomingFlit->sequenceNumber,
+             incomingFlit->header.srcID,
+             static_cast<uint8_t>(incomingFlit->header.flitType),
+             incomingFlit->payloadBytes);
+
+        // --- LINK_MGMT flit: process credit returns and discard ---
+        if (incomingFlit->header.flitType == FlitType::LINK_MGMT) {
+            warn("[UCIe RX Port] LINK_MGMT flit received. "
+                 "Processing credit returns hdr=%u data=%u.",
+                 incomingFlit->header.headerCreditsReturned,
+                 incomingFlit->header.dataCreditsReturned);
+
+            owner->d2dAdapter.creditManager.returnCredits(
+                incomingFlit->header.headerCreditsReturned,
+                incomingFlit->header.dataCreditsReturned,
+                incomingFlit->header.msgClass
+            );
+            delete incomingFlit;
+            return true;
+        }
+
+        // --- CRC Verification (UCIe Spec §7.6) ---
+        bool crcOk = UcieCRC::verifyFlitCRC(incomingFlit);
+
+        if (!crcOk) {
+            // ---------------------------------------------------------------
+            //  CRC FAIL path: issue NAK, discard corrupted flit
+            // ---------------------------------------------------------------
+            owner->stats.totalCrcErrors++;
+
+            warn("[UCIe RX Port] RECEIVER: CRC FAIL on flit seq=%u! "
+                 "Sending NAK. Total CRC errors so far: %lu.",
+                 incomingFlit->sequenceNumber,
+                 (unsigned long)owner->stats.totalCrcErrors.value());
+
+            owner->sendNak(incomingFlit->sequenceNumber);
+            delete incomingFlit;   // Discard corrupted flit
+            return true;
+        }
+
+        // --- CRC PASS path: ACK + unpack ---
+        warn("[UCIe RX Port] RECEIVER: CRC PASS on flit seq=%u. "
+             "Sending ACK and unpacking %zu TLPs.",
+             incomingFlit->sequenceNumber,
+             incomingFlit->originalPackets.size());
+
+        // Send ACK with piggybacked credit returns
+        owner->sendAck(incomingFlit->sequenceNumber);
+
+        // Unpack TLPs using the FlitUnpacker
+        std::vector<PacketPtr> tlps =
+            owner->rxUnpacker.processReceivedFlit(incomingFlit);
+
+        // Push extracted TLPs into RX buffer (respects back-pressure)
+        for (PacketPtr tlp : tlps) {
+            if (owner->d2dAdapter.rxBuffer.size() >=
+                owner->d2dAdapter.rxBufferMaxDepth) {
+                warn("[UCIe RX Port] RX buffer full (%zu/%u)! "
+                     "Dropping TLP addr=0x%llx — BACK-PRESSURE.",
+                     owner->d2dAdapter.rxBuffer.size(),
+                     owner->d2dAdapter.rxBufferMaxDepth,
+                     (unsigned long long)tlp->getAddr());
+                break;
+            }
+            owner->d2dAdapter.rxBuffer.push_back(tlp);
+        }
+
+        // Drain RX buffer → memory controller
+        size_t drained = 0;
+        while (!owner->d2dAdapter.rxBuffer.empty()) {
+            PacketPtr front = owner->d2dAdapter.rxBuffer.front();
+            bool sent = owner->txPort.sendTimingReq(front);
+
+            if (sent) {
+                owner->d2dAdapter.rxBuffer.pop_front();
+                ++drained;
+            } else {
+                warn("[UCIe RX Port] Memory busy — "
+                     "%zu TLP(s) remain in RX buffer.",
+                     owner->d2dAdapter.rxBuffer.size());
+                break;
+            }
+        }
+
+        warn("[UCIe RX Port] Drained %zu TLPs to memory this cycle. "
+             "RX buffer depth remaining=%zu.",
+             drained, owner->d2dAdapter.rxBuffer.size());
+
+        // Do NOT delete incomingFlit: memory is owned by originalPackets
+        // which are now in rxBuffer / forwarded to memory
+        delete incomingFlit;
+        return true;
+    }
+
+    // =========================================================================
+    //  ROLE A: Standard TLP from local CPU/cache → pack and send
+    // =========================================================================
+    warn("[UCIe RX Port] SENDER: TLP received from local stack. "
+         "addr=0x%llx size=%uB. Handing to FlitPacker.",
+         (unsigned long long)pkt->getAddr(), pkt->getSize());
+
+    // Guard: do not accept traffic if Adapter LSM is not ACTIVE
+    if (owner->currentLinkState != AdapterLinkState::ACTIVE) {
+        warn("[UCIe RX Port] SENDER: Adapter LSM not ACTIVE (state=%s). "
+             "Dropping TLP.",
+             adapterStateNames[static_cast<uint8_t>(owner->currentLinkState)]);
+        return false;
+    }
+
+    // Hand TLP to FlitPacker
+    UcieFlitPacket* readyFlit = owner->txPacker.processIncomingTLP(pkt);
+
+    if (readyFlit != nullptr) {
+        // A complete flit was assembled — cancel any pending flush timer
+        if (owner->flushEvent.scheduled()) {
+            owner->deschedule(owner->flushEvent);
+            owner->flushEventPending = false;
+            warn("[UCIe RX Port] Flush timer cancelled (flit assembled naturally).");
+        }
+
+        warn("[UCIe RX Port] SENDER: Flit assembled (seq=%u). "
+             "Transmitting now.",
+             readyFlit->sequenceNumber);
+
+        owner->transmitFlit(readyFlit);
+    }
+
+    // If staging buffer has data and no timer is running, start the 8-cycle timer
+    if (owner->txPacker.hasData() && !owner->flushEvent.scheduled()) {
+        Tick fireAt = curTick() + owner->clockPeriod() * owner->flushTimerCycles;
+        owner->schedule(owner->flushEvent, fireAt);
+        owner->flushEventPending = true;
+
+        warn("[UCIe RX Port] SENDER: Partial staging buffer (%uB/%uB). "
+             "Flush timer scheduled for tick=%lu (%lu cycles).",
+             owner->txPacker.stagedBytes(),
+             UCIE_PAYLOAD_SIZE_BYTES,
+             fireAt,
+             owner->flushTimerCycles);
+    }
+
+    return true;   // Tell upstream we accepted the TLP
+}
+
+// recvRespRetry - upstream caller can retyr after we previously blocked
+void UcieLink::UcieRxPort::recvRespRetry()
+{
+    warn("[UCIe RX Port] recvRespRetry — propagating retry to TX port.");
+    owner->txPort.sendRetryResp();
+}
+
+// getAddrRanges - transparent pass-through to whatever TX port connects to 
+AddrRangeList UcieLink::UcieRxPort::getAddrRanges() const
+{
+    AddrRangeList ranges = owner->txPort.getAddrRanges();
+    warn("[UCIe RX Port] getAddrRanges: forwarding %zu ranges from TX side.",
+         ranges.size());
+    return ranges;
+}
 
 
 
