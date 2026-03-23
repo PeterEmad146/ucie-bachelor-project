@@ -231,7 +231,7 @@ struct UcieFlitHeader
 static constexpr uint32_t UCIE_FLIT_SIZE_BYTES      = 256;  // Total flit size
 static constexpr uint32_t UCIE_HEADER_SIZE_BYTES    = 8;    // Flit header
 static constexpr uint32_t UCIE_CRC_SIZE_BYTES       = 12;   // CRC field
-static constexpr uint32_t UCIE_PAYLOAD_SIZZE_BYTES  =
+static constexpr uint32_t UCIE_PAYLOAD_SIZE_BYTES  =
     UCIE_FLIT_SIZE_BYTES - UCIE_HEADER_SIZE_BYTES - UCIE_CRC_SIZE_BYTES;    // 236
 
 //  Maximum sequence number before wrap-around (7-bit filed -> 0..127)
@@ -537,7 +537,7 @@ class UcieLink : public ClockedObject
         {
             // Flit sizing (spec-mandated, duplicated here for clarity)
             static constexpr uint32_t FLIT_SIZE     = UCIE_FLIT_SIZE_BYTES;     // 256
-            static constexpr uint32_t PAYLOAD_SIZE  = UCIE_PAYLOAD_SIZZE_BYTES; // 236
+            static constexpr uint32_t PAYLOAD_SIZE  = UCIE_PAYLOAD_SIZE_BYTES; // 236
 
             // Retry Buffer
             // Holds every transmitted flit until an ACK is received.

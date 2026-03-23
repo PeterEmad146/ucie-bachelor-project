@@ -585,6 +585,7 @@ void UcieLink::init()
          logicalPhy.linkWidth, logicalPhy.dataRateGbps);
 }   
 
+// ================================================================================
 //  S6 STATE MACHINES
 //
 //  Two independent machines must be advanced in lockstep:
@@ -593,6 +594,7 @@ void UcieLink::init()
 //
 //  The spec mandates that PhyLinkState must reach a given level BEFORE
 //  the AdapterLinkState can request the equivalent level.
+// ================================================================================
 
 // State name tables for warn() output
 static const char* phyStateNames[] = {
@@ -812,5 +814,131 @@ void UcieLink::exitPowerManagement()
     warn("[UCIe PM] PM exit complete. Link ACTIVE. Draining TX queue.");
     drainTxSendQueue();
 }
+
+// ================================================================================
+//  S7 TX PIPELINE
+// ================================================================================
+
+//  transmitFlit
+//  1. Generates CRC fr the flit 
+//  2. Optionally injects a simulated bit error (test harness)
+//  3. Checks credit availability
+//  4. Pushes flit into txSendQueue and triggers drainTxSendQueue()
+//  5. Updates statistics
+//  6. Stores flit in txRetryBuffer (for potential NAK retransmission)
+void UcieLink::transmitFlit(UcieFlitPacket* flit)
+{
+    assert(flit != nullptr);
+    assert(currentLinkState == AdapterLinkState::ACTIVE);
+
+    // CRC generation 
+    UcieCRC::generateFlitCRC(flit);
+
+    // Simulated bit error injection
+    // A random float in [0, 1) is compared to errorRate. If less, the flit's
+    // CRC is corrupted to simulate a physical transmission error.
+    if (errorRate > 0.0 && ((double)rand() / RAND_MAX) < errorRate) {
+        flit->crcGroups[0] ^= 0xDEADBEEFu;  // Corrupt first CRC group
+        warn("[UCIe TX] ERROR INJECTED on flit seq=%u (errorRate=%.2e). "
+             "CRC group[0] corrupted → receiver will NAK.",
+             flit->sequenceNumber, errorRate);
+    }
+
+    // Credit check 
+    MessageClass cls = flit->header.msgClass;
+    if (!d2dAdapter.creditManager.canSend(cls, flit->payloadBytes)) {
+        warn("[UCIe TX] Credit stall! Flit seq=%u queued. "
+             "Waiting for credit returns from remote chiplet.",
+             flit->sequenceNumber);
+        txBlocked = true;
+        // Push to send queue; will be drained when credits are returned
+        txSendQueue.push_back(flit);
+        return;
+    }
+
+    // Consume credits
+    d2dAdapter.creditManager.consumeCredits(cls, flit->payloadBytes);
+
+    // Add to retry buffer BEFORE sending (in case NAK arrives)
+    if(d2dAdapter.txRetryBuffer.size() >= d2dAdapter.retryBufferCapacity) {
+        warn("[UCIe TX] WARNING: Retry buffer full (%zu/%u). "
+             "Back-pressure — flit seq=%u queued.",
+             d2dAdapter.txRetryBuffer.size(),
+             d2dAdapter.retryBufferCapacity,
+             flit->sequenceNumber);
+        txSendQueue.push_back(flit);
+        return;
+    }
+    d2dAdapter.txRetryBuffer.push_back(flit);
+
+    // Update statistics
+    stats.totalFlitsSent++;
+    stats.totalTLPsSent     += flit->originalPackets.size();
+    stats.totalPayloadBytes += flit->payloadBytes;
+    stats.totalPaddingBytes += flit->paddingBytes;
+
+    if (flit->isRetransmission) {
+        stats.totalRetransmissions++;
+    }
+
+    warn("[UCIe TX] Sending flit seq=%u → chiplet %u. "
+         "TLPs=%zu payload=%uB padding=%uB retransmit=%s. "
+         "RetryBuf=%zu/%u.",
+         flit->sequenceNumber,
+         d2dAdapter.remoteChipletID,
+         flit->originalPackets.size(),
+         flit->payloadBytes,
+         flit->paddingBytes,
+         flit->isRetransmission ? "YES" : "NO",
+         d2dAdapter.txRetryBuffer.size(),
+         d2dAdapter.retryBufferCapacity);
+
+    // Send across the wire (scheduled at linklatency in gem5 timing)
+    bool sent = txPort.sendTimingReq(flit);
+    if (!sent) {
+        txBlocked = true;
+        warn("[UCIe TX] txPort.sendTimingReq blocked (downstream busy). "
+             "Flit seq=%u remains in retry buffer. Will retry on recvReqRetry.",
+             flit->sequenceNumber);
+    }
+}
+
+//  drainTxSendQueue - attempt to send all queued flits
+void UcieLink::drainTxSendQueue()
+{
+    warn("[UCIe TX] drainTxSendQueue: %zu flits queued.", txSendQueue.size());
+    
+    while (!txSendQueue.empty()) {
+        UcieFlitPacket* front = txSendQueue.front();
+
+        // Re-check credits before each send attempt
+        if (!d2dAdapter.creditManager.canSend(front->header.msgClass,front->payloadBytes)) {
+            warn("[UCIe TX] drainTxSendQueue: Still credit-starved. Stopping.");
+            break;
+        }
+
+        txSendQueue.pop_front();
+        transmitFlit(front);    // This will send or re-queue if port is busy
+
+        if (txBlocked) break;   // Port busy again, stop draining
+    }
+}
+
+//  processFlushEvent - 8-cycle timer fires, flush partial staging buffer
+void UcieLink::processFlushEvent()
+{
+    flushEventPending = false;
+
+    warn("[UCIe Flush] Timer fired after %lu cycles. "
+         "Staged bytes=%u.", flushTimerCycles, txPacker.stagedBytes());
+
+    UcieFlitPacket* flit = txPacker.forceFlush();
+    if(flit != nullptr) {
+        transmitFlit(flit);
+    }
+}
+
+
+
 
 } // namespace gem5
