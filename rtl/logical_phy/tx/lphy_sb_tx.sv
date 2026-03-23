@@ -8,4 +8,5 @@ module lphy_sb_tx (
     output logic        TXCKSB,
     output logic        TXDATASBRD, // Advanced pkg redundant
     output logic        TXCKSBRD
+    
 );
