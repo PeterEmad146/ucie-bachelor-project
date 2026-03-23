@@ -1386,7 +1386,108 @@ AddrRangeList UcieLink::UcieRxPort::getAddrRanges() const
     return ranges;
 }
 
+// ================================================================================
+//  S12     DIAGNOSTICS
+// ================================================================================
+void UcieLink::dumpLinkStatus() const
+{
+    warn("=== UCIe Link Status Dump [%s] ===", name().c_str());
 
+    // --- Physical Layer State ---
+    warn("  [PHY Layer - §4.5.3 Table 22]");
+    warn("  PHY State    : %s",
+         phyStateNames[static_cast<uint8_t>(phyLinkState)]);
 
+    // --- Adapter LSM State ---
+    warn("  [Adapter LSM - §3.4]");
+    warn("  Adapter State: %s",
+         adapterStateNames[static_cast<uint8_t>(currentLinkState)]);
+
+    // Spec §3.4 gating check — warn if hierarchy is violated
+    bool phyActive     = (phyLinkState     == PhyLinkState::ACTIVE);
+    bool adapterActive = (currentLinkState == AdapterLinkState::ACTIVE);
+    if (adapterActive && !phyActive) {
+        warn("  *** SPEC VIOLATION: Adapter is ACTIVE but PHY is not ACTIVE! "
+             "(UCIe Spec §3.4) ***");
+    }
+
+    // --- Chiplet identity ---
+    warn("  Local  ID    : %u", d2dAdapter.localChipletID);
+    warn("  Remote ID    : %u", d2dAdapter.remoteChipletID);
+    warn("  Lane Width   : x%d @ %.1f GT/s",
+         logicalPhy.linkWidth, logicalPhy.dataRateGbps);
+    warn("  Link Latency : %lu ticks", logicalPhy.linkLatency);
+    warn("  Eff. BW      : %.3f GB/s",
+         logicalPhy.linkWidth * logicalPhy.dataRateGbps / 8.0);
+
+    // --- TX pipeline ---
+    warn("  TX Blocked   : %s", txBlocked ? "YES" : "NO");
+    warn("  Retry Buffer : %zu / %u flits",
+         d2dAdapter.txRetryBuffer.size(), d2dAdapter.retryBufferCapacity);
+    warn("  Last ACK'd   : seq=%u", d2dAdapter.lastAckedSeqNum);
+    warn("  RX Buffer    : %zu / %u TLPs",
+         d2dAdapter.rxBuffer.size(), d2dAdapter.rxBufferMaxDepth);
+    warn("  TX SendQueue : %zu flits pending", txSendQueue.size());
+    warn("  Staging      : %u / %u bytes",
+         txPacker.stagedBytes(), UCIE_PAYLOAD_SIZE_BYTES);
+    warn("  Flush Timer  : %s (%lu cycles)",
+         flushEventPending ? "RUNNING" : "IDLE", flushTimerCycles);
+
+    // --- Credit pools (per message class) ---
+    warn("  [Credit Pools - UCIe Spec §7.5]");
+    const char* clsNames[] = { "NPR", "PR ", "CPL" };
+    for (int cls = 0; cls < UcieCreditManager::NUM_MSG_CLASSES; ++cls) {
+        warn("  Credits[%s]  : txAvail=%u  rxGranted=%u  rxConsumed=%u",
+             clsNames[cls],
+             d2dAdapter.creditManager.pools[cls].txAvailable,
+             d2dAdapter.creditManager.pools[cls].rxGranted,
+             d2dAdapter.creditManager.pools[cls].rxConsumed);
+    }
+
+    // --- Statistics ---
+    warn("  [Statistics - aligned with REF-PAPER evaluation metrics]");
+    warn("  Flits Sent       : %lu",
+         (unsigned long)stats.totalFlitsSent.value());
+    warn("  TLPs Sent        : %lu",
+         (unsigned long)stats.totalTLPsSent.value());
+    warn("  Payload Bytes    : %lu",
+         (unsigned long)stats.totalPayloadBytes.value());
+    warn("  Padding Bytes    : %lu",
+         (unsigned long)stats.totalPaddingBytes.value());
+
+    // Payload efficiency — guard against division by zero
+    uint64_t totalBytes = (uint64_t)stats.totalPayloadBytes.value()
+                        + (uint64_t)stats.totalPaddingBytes.value();
+    if (totalBytes > 0) {
+        double eff = 100.0 * stats.totalPayloadBytes.value() / totalBytes;
+        warn("  Payload Eff.     : %.2f%%  (spec max = %.2f%%)",
+             eff,
+             100.0 * UCIE_PAYLOAD_SIZE_BYTES / UCIE_FLIT_SIZE_BYTES);
+    } else {
+        warn("  Payload Eff.     : N/A (no flits sent yet)");
+    }
+
+    warn("  Retransmissions  : %lu  (%.4f%% of flits sent)",
+         (unsigned long)stats.totalRetransmissions.value(),
+         stats.totalFlitsSent.value() > 0
+             ? 100.0 * stats.totalRetransmissions.value()
+               / stats.totalFlitsSent.value()
+             : 0.0);
+    warn("  NAKs Received    : %lu",
+         (unsigned long)stats.totalFlitsNaked.value());
+    warn("  Flits Received   : %lu",
+         (unsigned long)stats.totalFlitsReceived.value());
+    warn("  CRC Errors (RX)  : %lu  (%.4f%% of flits received)",
+         (unsigned long)stats.totalCrcErrors.value(),
+         stats.totalFlitsReceived.value() > 0
+             ? 100.0 * stats.totalCrcErrors.value()
+               / stats.totalFlitsReceived.value()
+             : 0.0);
+    warn("  ACKs Sent        : %lu",
+         (unsigned long)stats.totalAcksSent.value());
+    warn("  NAKs Sent        : %lu",
+         (unsigned long)stats.totalNaksSent.value());
+    warn("=== End UCIe Link Status [%s] ===", name().c_str());
+}
 
 } // namespace gem5
