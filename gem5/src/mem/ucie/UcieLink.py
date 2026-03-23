@@ -25,9 +25,14 @@ class UcieLink(ClockedObject):
     # ==========================================================
     # These match the exact specifications from the referece paper.
     # When gem5 copmiles, it creates a C++ variable for each of these.
-    link_latency = Param.Latency('2ns', "Physical Link Latency")
-    retry_buffer_capacity = Param.MemorySize('32kB', "Adapter Buffer Size")
-    flit_size = Param.Int(256, "UCIe Flit Size in Bytes")
-    link_width = Param.Int(16, "Link Width in Lanes")
-    data_rate = Param.String('16GT/s', "Data Rate per pin")
-    error_rate = Param.Float(0.1,"Probability of a CRC error causing a NAK")
+    link_latency            = Param.Latency('2ns', "Physical Link Latency")
+    retry_buffer_capacity   = Param.MemorySize('32kB', "Adapter Buffer Size")
+    flit_size               = Param.Int(256, "UCIe Flit Size in Bytes")
+    link_width              = Param.Int(16, "Link Width in Lanes")
+    data_rate               = Param.String('16GT/s', "Data Rate per pin")
+    error_rate              = Param.Float(0.1,"Probability of a CRC error causing a NAK")
+    flush_timer_cycles      = Param.Cycles(8, "Flush timer (UCIe spec default)")
+    data_rate_gbps          = Param.Float(32.0, "Per-lane data rate in Gbps")
+    rx_buffer_depth         = Param.Unsigned(64, "Max TLPs in RX buffer")
+    local_chiplet_id        = Param.Unsigned(0, "This chiplet's ID")
+    remote_chiplet_id       = Param.Unsigned(1, "Remote chiplet's ID")

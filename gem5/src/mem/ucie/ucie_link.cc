@@ -1078,6 +1078,99 @@ void UcieLink::sendNak(uint8_t nakSeqNum)
     rxPort.sendTimingResp(nak);
 }
 
+// ================================================================================
+//  S9 TX PORT CALLBACKS
+//  UcieTxPort connects to the REMOTE chiplet (or memory controller).
+//  Responses arriving here are ACK/NAK flits from the receiver
+// ================================================================================
+
+UcieLink::UcieTxPort::UcieTxPort(const std::string& name, UcieLink* owner)
+    : RequestPort(name), owner(owner) {}
+
+// recvTimingResp - ACK/NAK from remote chiplet, OR read data from memory
+bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
+{
+    // Try to interpret this response as a UCIe control flit
+    UcieFlitPacket* ctrlFlit = dynamic_cast<UcieFlitPacket*>(pkt);
+
+    if (ctrlFlit != nullptr) {
+        //  UCIe Control Flit (ACK or NAK) received
+        if (ctrlFlit->header.flitType == FlitType::FLIT_LEVEL_ACK) {
+            warn("[UCIe TX Port] ACK received for seq=%u.",
+                 ctrlFlit->header.ackNakSeqNum);
+
+            // Process piggybacked credit returns
+            owner->d2dAdapter.creditManager.returnCredits(
+                ctrlFlit->header.headerCreditsReturned,
+                ctrlFlit->header.dataCreditsReturned,
+                ctrlFlit->header.msgClass
+            );
+
+            owner->processAck(ctrlFlit->header.ackNakSeqNum);
+
+        } else if (ctrlFlit->header.flitType == FlitType::FLIT_LEVEL_NAK) {
+            warn("[UCIe TX Port] NAK received for seq=%u.",
+                 ctrlFlit->header.ackNakSeqNum);
+            owner->processNak(ctrlFlit->header.ackNakSeqNum);
+
+        } else {
+            warn("[UCIe TX Port] Unexpected flit type=%u in recvTimingResp.",
+                 static_cast<uint8_t>(ctrlFlit->header.flitType));
+        }
+        delete ctrlFlit;   // Sender owns and frees ACK/NAK containers
+        return true;
+    }
+
+    //  Standard memory read response — forward back to local CPU/cache
+    warn("[UCIe TX Port] Memory read response (addr=0x%llx size=%uB) "
+         "returning to local chiplet.",
+         (unsigned long long)pkt->getAddr(), pkt->getSize());
+
+    return owner->rxPort.sendTimingResp(pkt);
+}
+
+// recvReqRetry - downstream became available; resume pending sends
+void UcieLink::UcieTxPort::recvReqRetry()
+{
+    warn("[UCIe TX Port] recvReqRetry — downstream unblocked. "
+         "Resuming. rxBuffer=%zu txSendQueue=%zu txRetryBuf=%zu.",
+         owner->d2dAdapter.rxBuffer.size(),
+         owner->txSendQueue.size(),
+         owner->d2dAdapter.txRetryBuffer.size());
+
+    owner->txBlocked = false;
+
+    // Priority 1: drain RX buffer (unpacked TLPs destined for memory)
+    while (!owner->d2dAdapter.rxBuffer.empty()) {
+        PacketPtr front = owner->d2dAdapter.rxBuffer.front();
+        bool sent = sendTimingReq(front);
+
+        if (sent) {
+            warn("[UCIe TX Port] Drained TLP from rxBuffer → memory "
+                 "(addr=0x%llx).", (unsigned long long)front->getAddr());
+            owner->d2dAdapter.rxBuffer.pop_front();
+        } else {
+            warn("[UCIe TX Port] Memory still busy. "
+                 "Stopping rxBuffer drain (%zu remaining).",
+                 owner->d2dAdapter.rxBuffer.size());
+            owner->txBlocked = true;
+            return;
+        }
+    }
+
+    // Priority 2: drain outgoing flit send queue
+    owner->drainTxSendQueue();
+}
+
+// recvRangeChange - propagate address range updates upstream
+void UcieLink::UcieTxPort::recvRangeChange()
+{
+    warn("[UCIe TX Port] Address range change received — "
+         "propagating to RX port.");
+    owner->rxPort.sendRangeChange();
+}
+
+
 
 
 
