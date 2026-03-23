@@ -1,4 +1,5 @@
 // Sideband Serializer
+//
 // Accept a 64-bit parallel word from the sideband controller and serialize it
 // at 800 MT/s onto TXDATASB, with TXCKSB strobing active dring transmission.
 //
@@ -15,7 +16,6 @@
 //
 // Internal state machine:
 //      IDLE -> TRANSMIT (64 cycles) -> GAP (32 cycles) -> IDLE
-
 
 module lphy_sb_tx (
     input  logic        clk_800m,   // 800 MHz always-on
