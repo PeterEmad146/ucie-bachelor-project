@@ -119,6 +119,7 @@
 // ============================================================================
 
 `timescale 1ns / 1ps
+`include "lphy_sb_crc.sv"
 
 module lphy_sb_pkt_enc (
 
