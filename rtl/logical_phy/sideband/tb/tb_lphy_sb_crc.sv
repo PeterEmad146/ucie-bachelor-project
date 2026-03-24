@@ -42,14 +42,6 @@
 //   gtkwave tb_lphy_sb_crc.vcd   (optional waveform view)
 //
 // ============================================================================
-// REVISION HISTORY
-// ----------------
-//   Rev   Date        Author       Description
-//   1.0   2026-03-23  UCIe LPHY    Initial implementation
-//   1.1   2026-03-23  UCIe LPHY    Added Group D mask integrity tests;
-//                                  moved DUT assertions into testbench;
-//                                  added transient-glitch commentary
-// ============================================================================
 
 `timescale 1ns / 1ps
 
