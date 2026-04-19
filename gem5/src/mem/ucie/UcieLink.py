@@ -8,31 +8,53 @@ class UcieLink(ClockedObject):
     type = 'UcieLink'
 
     # Tells the Python interpreter exactly where to find the C++ class
-    # that implements the actual behavior for this hardware.
     cxx_header = "mem/ucie/ucie_link.hh"
-    cxx_class = "gem5::UcieLink"
+    cxx_class  = "gem5::UcieLink"
 
-    # ==========================================================        
+    # ==========================================================
     # HARDWARE PORTS
     # ==========================================================
-    # RequestPort acts as the "Master" interface (sends requests out)
+    # RequestPort – sends flits out to the adjacent chiplet
     tx_port = RequestPort("Transmit port to the adjacent chiplet")
-    # ResponsePort acts as the "Slave" interface (receives requests in)
+    # ResponsePort – receives TLPs from the local chiplet's protocol stack
     rx_port = ResponsePort("Receive port from the adjacent chiplet")
 
     # ==========================================================
-    # HARDWARE PARAMTERS (Knobs for the simulation script)
+    # HARDWARE PARAMETERS
     # ==========================================================
-    # These match the exact specifications from the referece paper.
-    # When gem5 copmiles, it creates a C++ variable for each of these.
-    link_latency            = Param.Latency('2ns', "Physical Link Latency")
-    retry_buffer_capacity   = Param.MemorySize('32kB', "Adapter Buffer Size")
-    flit_size               = Param.Int(256, "UCIe Flit Size in Bytes")
-    link_width              = Param.Int(16, "Link Width in Lanes")
-    data_rate               = Param.String('16GT/s', "Data Rate per pin")
-    error_rate              = Param.Float(0.1,"Probability of a CRC error causing a NAK")
-    flush_timer_cycles      = Param.Cycles(8, "Flush timer (UCIe spec default)")
-    data_rate_gbps          = Param.Float(32.0, "Per-lane data rate in Gbps")
-    rx_buffer_depth         = Param.Unsigned(64, "Max TLPs in RX buffer")
-    local_chiplet_id        = Param.Unsigned(0, "This chiplet's ID")
-    remote_chiplet_id       = Param.Unsigned(1, "Remote chiplet's ID")
+    link_latency          = Param.Latency('2ns',
+                                "Point-to-point propagation delay")
+
+    # [REF-PAPER] Timeout before automatic single-retry retransmission.
+    # Chosen large enough to cover typical ACK round-trip latency.
+    retry_timeout_delay   = Param.Latency('100ns',
+                                "Timeout before automatic retransmission")
+
+    # Number of flits held in the retry buffer pending ACK (count, not bytes)
+    retry_buffer_capacity = Param.Unsigned(128,
+                                "Retry buffer capacity in flits")
+
+    flit_size             = Param.Int(256,
+                                "UCIe flit size in bytes (spec-mandated 256)")
+
+    link_width            = Param.Int(16,
+                                "Link width in lanes")
+
+    data_rate             = Param.String('16GT/s',
+                                "Negotiated data rate string (informational)")
+
+    # Bit-error rate injected per flit for testing. 0.0 = error-free.
+    error_rate            = Param.Float(0.0,
+                                "Per-flit CRC corruption probability (0=off)")
+
+    data_rate_gbps        = Param.Float(32.0,
+                                "Per-lane data rate in Gbps")
+
+    rx_buffer_depth       = Param.Unsigned(64,
+                                "Max TLPs in the RX buffer")
+
+    local_chiplet_id      = Param.Unsigned(0,
+                                "This chiplet's identifier")
+
+    remote_chiplet_id     = Param.Unsigned(1,
+                                "Remote chiplet's identifier")

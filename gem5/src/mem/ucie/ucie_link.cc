@@ -211,18 +211,16 @@ FlitPacker::FlitPacker(uint32_t flit_size)
       currentBytes(0),
       nextSequenceNumber(0)
 {
-    warn("[UCIe Packer] Initialized. flitSize=%uB payloadLimit=%uB "
-         "(header=%uB + CRC=%uB overhead).",
-         flitSize, maxPayloadSize,
-         UCIE_HEADER_SIZE_BYTES, UCIE_CRC_SIZE_BYTES);
+    warn("[UCIe Packer] Init. flitSize=%uB payloadLimit=%uB.",
+         flitSize, maxPayloadSize);
+
 }
 
-// assignSequenceNumber - 7-bit wrapping counter 
-uint8_t FlitPacker::assignSequenceNumber()
+Tick FlitPacker::assignTimestampSequence()
 {
-    uint8_t seq = nextSequenceNumber;
-    nextSequenceNumber = (nextSequenceNumber + 1) % UCIE_MAX_SEQ_NUM;
-    return seq;
+       // Returns the current simulation Tick
+       // This is monotonically increasing and unique in gem5
+       return curTick();
 }
 
 // assembleFlit - build a UcieFlitPacker from the current staging buffer.
@@ -243,7 +241,7 @@ UcieFlitPacket* FlitPacker::assembleFlit(bool isPartial)
             : stagingBuffer.front()->req->requestorId()
     );
 
-    uint8_t seq = assignSequenceNumber();
+    Tick seq = assignTimestampSequence();
 
     UcieFlitPacket* flit = new UcieFlitPacket(
         flitReq, MemCmd::WriteReq, seq, FlitType::PROTOCOL
@@ -252,11 +250,6 @@ UcieFlitPacket* FlitPacker::assembleFlit(bool isPartial)
     // Transfer TLPs from staging -> flit
     flit->originalPackets = stagingBuffer;
     flit->payloadBytes    = currentBytes;
-    flit->paddingBytes    = maxPayloadSize - currentBytes;
-
-    // Segmentation flags: most flits are single-TLP non-segmented
-    flit->isFirstSegment  = true;
-    flit->isLastSegment   = currentBytes;
     flit->paddingBytes    = maxPayloadSize - currentBytes;
 
     // Segmentation flags: most flits are single-TLP non-segmented
@@ -494,9 +487,11 @@ UcieLink::UcieLink(const UcieLinkParams& p)
       txBlocked(false),
       phyLinkState(PhyLinkState::RESET),
       currentLinkState(AdapterLinkState::RESET),
-      flushTimerCycles(p.flush_timer_cycles),
-      flushEventPending(false),
-      flushEvent([this]{ processFlushEvent(); }, name() + ".flushEvent"),
+      packTlpEvent([this]{ processPackTlp(); }, name() + ".packTlpEvent",
+                    false, EventBase::Maximum_Pri),
+      sendFlitEvent([this]{ processSendFlit(); }, name() + ".sendFlitEvent"),
+      retryTimeoutEvent([this] { processRetryTimeout(); }, name() + ".retryTimeoutEvent"),
+      retryTimeoutDelay(p.retry_timeout_delay),
       stats(this)
 {
     // D2D Adapter configuration
@@ -518,20 +513,16 @@ UcieLink::UcieLink(const UcieLinkParams& p)
         (logicalPhy.linkWidth * logicalPhy.dataRateGbps * 1e9)
         / (8.0 * 1e12);
 
-    warn("[UCIe Link] Constructed. "
-         "localID=%u remoteID=%u linkWidth=x%d dataRate=%.1fGbps "
-         "latency=%lu ticks flitSize=%uB payloadLimit=%uB "
-         "retryBufCap=%u errorRate=%.2e flushTimer=%lu cycles.",
-         d2dAdapter.localChipletID,
-         d2dAdapter.remoteChipletID,
-         logicalPhy.linkWidth,
-         logicalPhy.dataRateGbps,
-         logicalPhy.linkLatency,
-         p.flit_size,
-         UCIE_PAYLOAD_SIZE_BYTES,
-         d2dAdapter.retryBufferCapacity,
-         errorRate,
-         flushTimerCycles);
+    warn("[UCIe Link] Constructed. localID=%u remoteID=%u "
+         "linkWidth=x%d dataRate=%.1fGbps latency=%lu ticks "
+         "retryTimeout=%lu ticks flitSize=%uB payloadLimit=%uB "
+         "retryBufCap=%u errorRate=%.2e.",
+         d2dAdapter.localChipletID, d2dAdapter.remoteChipletID,
+         logicalPhy.linkWidth, logicalPhy.dataRateGbps,
+         logicalPhy.linkLatency, retryTimeoutDelay,
+         p.flit_size, UCIE_PAYLOAD_SIZE_BYTES,
+         d2dAdapter.retryBufferCapacity, errorRate);
+
 }
 
 // getPort - wires Python-named ports to C++ port objects
@@ -610,36 +601,31 @@ static const char* adapterStateNames[] = {
 // transitionPhyState - advance the Physical Layer training FSM
 void UcieLink::transitionPhyState(PhyLinkState newState)
 {
-    uint8_t oldIdx = static_cast<uint8_t>(phyLinkState);
-    uint8_t newIdx = static_cast<uint8_t>(newState);
-
-    warn("[UCIe PHY State] %s → %s (tick=%lu).",
-         phyStateNames[oldIdx], phyStateNames[newIdx], curTick());
-
+    warn("[UCIe PHY] %s → %s (tick=%lu).",
+         phyStateNames[static_cast<uint8_t>(phyLinkState)],
+         phyStateNames[static_cast<uint8_t>(newState)],
+         curTick());
     phyLinkState = newState;
 }
+
 
 // transitionLinkState - advance the Adapter LSM
 // Enforces: PhyLinkState must be ACTIVE before AdapterLinkState -> ACTIVE
 void UcieLink::transitionLinkState(AdapterLinkState newState)
 {
-    // RDI SM (Physical Layer) must be in Active before Adapter LSM
     if (newState == AdapterLinkState::ACTIVE &&
         phyLinkState != PhyLinkState::ACTIVE) {
-        warn("[UCIe Adapter State] BLOCKED: Cannot enter ACTIVE — "
-             "Physical Layer is in %s (must be ACTIVE first).",
+        warn("[UCIe Adapter] BLOCKED: cannot enter ACTIVE while PHY is in %s.",
              phyStateNames[static_cast<uint8_t>(phyLinkState)]);
         return;
     }
-
-    uint8_t oldIdx = static_cast<uint8_t>(currentLinkState);
-    uint8_t newIdx = static_cast<uint8_t>(newState);
-
-    warn("[UCIe Adapter State] %s → %s (tick=%lu).",
-         adapterStateNames[oldIdx], adapterStateNames[newIdx], curTick());
-
+    warn("[UCIe Adapter] %s → %s (tick=%lu).",
+         adapterStateNames[static_cast<uint8_t>(currentLinkState)],
+         adapterStateNames[static_cast<uint8_t>(newState)],
+         curTick());
     currentLinkState = newState;
 }
+
 
 // handleSbInit - SBINIT: Sideband initialization 
 // Behavioral model: detect sideband, exchange {SBINIT Out of Reset} and
@@ -815,93 +801,133 @@ void UcieLink::exitPowerManagement()
     drainTxSendQueue();
 }
 
-// ================================================================================
-//  S7 TX PIPELINE
-// ================================================================================
+// S7   TX PIPELINE
 
-//  transmitFlit
-//  1. Generates CRC fr the flit 
-//  2. Optionally injects a simulated bit error (test harness)
-//  3. Checks credit availability
-//  4. Pushes flit into txSendQueue and triggers drainTxSendQueue()
-//  5. Updates statistics
-//  6. Stores flit in txRetryBuffer (for potential NAK retransmission)
+// Logic for Pack TLP: highest priority
+void UcieLink::processPackTlp()
+{
+    warn("[UCIe Task] processPackTlp (MaxPri) fired at tick=%lu.", curTick());
+    // Schedule sendFlit on next 8-cycle boundary if there is data to send
+    if ((txPacker.hasData() || !txSendQueue.empty()) &&
+        !sendFlitEvent.scheduled()) {
+        schedule(sendFlitEvent, curTick() + clockPeriod() * 8);
+        warn("[UCIe Task] sendFlitEvent scheduled at tick=%lu.",
+             curTick() + clockPeriod() * 8);
+    }
+}
+
+
+// Logic for Send Flit: 8-Cycle Aligned
+void UcieLink::processSendFlit()
+{
+    warn("[UCIe Task] processSendFlit at tick=%lu. "
+         "staged=%uB queuedFlits=%zu.",
+         curTick(), txPacker.stagedBytes(), txSendQueue.size());
+
+    // Flush partial staging buffer if present
+    if (!txPacker.isStagingBufferEmpty()) {
+        UcieFlitPacket* flit = txPacker.forceFlush();
+        if (flit) {
+            txSendQueue.push_back(flit);
+            warn("[UCIe Task] Partial flit seq=%lu queued for send.",
+                 flit->sequenceNumber);
+        }
+    }
+
+    drainTxSendQueue();
+
+    // Reschedule ONLY if there is more work – prevents idle simulation cycles
+    if (!txSendQueue.empty() || !txPacker.isStagingBufferEmpty()) {
+        schedule(sendFlitEvent, curTick() + clockPeriod() * 8);
+        warn("[UCIe Task] sendFlitEvent rescheduled (still has data).");
+    } else {
+        warn("[UCIe Task] Link idle – sendFlitEvent NOT rescheduled. "
+             "Simulation cycles saved per [REF-PAPER].");
+    }
+}
+
+void UcieLink::processRetryTimeout()
+{
+    if (d2dAdapter.txRetryBuffer.empty()) {
+        warn("[UCIe Retry] Timeout fired but retry buffer empty – ignoring.");
+        return;
+    }
+    warn("[UCIe Retry] Timeout! Moving %zu flits back to send queue.",
+         d2dAdapter.txRetryBuffer.size());
+
+    // Move all un-ACKed flits back to send queue for one retry attempt
+    while (!d2dAdapter.txRetryBuffer.empty()) {
+        UcieFlitPacket* f = d2dAdapter.txRetryBuffer.front();
+        f->isRetransmission = true;
+        txSendQueue.push_back(f);
+        d2dAdapter.txRetryBuffer.pop_front();
+    }
+
+    // Wake up sender if idle
+    if (!txBlocked && !sendFlitEvent.scheduled()) {
+        schedule(sendFlitEvent, curTick());
+    }
+}
+
 void UcieLink::transmitFlit(UcieFlitPacket* flit)
 {
     assert(flit != nullptr);
     assert(currentLinkState == AdapterLinkState::ACTIVE);
 
-    // CRC generation 
     UcieCRC::generateFlitCRC(flit);
 
-    // Simulated bit error injection
-    // A random float in [0, 1) is compared to errorRate. If less, the flit's
-    // CRC is corrupted to simulate a physical transmission error.
+    // Simulated bit-error injection
     if (errorRate > 0.0 && ((double)rand() / RAND_MAX) < errorRate) {
-        flit->crcGroups[0] ^= 0xDEADBEEFu;  // Corrupt first CRC group
-        warn("[UCIe TX] ERROR INJECTED on flit seq=%u (errorRate=%.2e). "
-             "CRC group[0] corrupted → receiver will NAK.",
+        flit->crcGroups[0] ^= 0xDEADBEEFu;
+        warn("[UCIe TX] ERROR INJECTED on flit seq=%lu (rate=%.2e).",
              flit->sequenceNumber, errorRate);
     }
 
-    // Credit check 
     MessageClass cls = flit->header.msgClass;
     if (!d2dAdapter.creditManager.canSend(cls, flit->payloadBytes)) {
-        warn("[UCIe TX] Credit stall! Flit seq=%u queued. "
-             "Waiting for credit returns from remote chiplet.",
+        warn("[UCIe TX] Credit stall – flit seq=%lu queued.",
              flit->sequenceNumber);
         txBlocked = true;
-        // Push to send queue; will be drained when credits are returned
         txSendQueue.push_back(flit);
         return;
     }
-
-    // Consume credits
     d2dAdapter.creditManager.consumeCredits(cls, flit->payloadBytes);
 
-    // Add to retry buffer BEFORE sending (in case NAK arrives)
-    if(d2dAdapter.txRetryBuffer.size() >= d2dAdapter.retryBufferCapacity) {
-        warn("[UCIe TX] WARNING: Retry buffer full (%zu/%u). "
-             "Back-pressure — flit seq=%u queued.",
+    if (d2dAdapter.txRetryBuffer.size() >= d2dAdapter.retryBufferCapacity) {
+        warn("[UCIe TX] Retry buffer full (%zu/%u). Back-pressure flit seq=%lu.",
              d2dAdapter.txRetryBuffer.size(),
-             d2dAdapter.retryBufferCapacity,
-             flit->sequenceNumber);
+             d2dAdapter.retryBufferCapacity, flit->sequenceNumber);
         txSendQueue.push_back(flit);
         return;
     }
     d2dAdapter.txRetryBuffer.push_back(flit);
+    // Start retry timeout if not already running
+    if (!retryTimeoutEvent.scheduled()) {
+        schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+        warn("[UCIe TX] Retry timeout scheduled at tick=%lu.",
+             curTick() + retryTimeoutDelay);
+    }
 
-    // Update statistics
     stats.totalFlitsSent++;
     stats.totalTLPsSent     += flit->originalPackets.size();
     stats.totalPayloadBytes += flit->payloadBytes;
     stats.totalPaddingBytes += flit->paddingBytes;
+    if (flit->isRetransmission) stats.totalRetransmissions++;
 
-    if (flit->isRetransmission) {
-        stats.totalRetransmissions++;
-    }
-
-    warn("[UCIe TX] Sending flit seq=%u → chiplet %u. "
-         "TLPs=%zu payload=%uB padding=%uB retransmit=%s. "
-         "RetryBuf=%zu/%u.",
-         flit->sequenceNumber,
-         d2dAdapter.remoteChipletID,
-         flit->originalPackets.size(),
-         flit->payloadBytes,
-         flit->paddingBytes,
+    warn("[UCIe TX] Sending flit seq=%lu → chiplet %u. "
+         "TLPs=%zu payload=%uB padding=%uB retx=%s retryBuf=%zu/%u.",
+         flit->sequenceNumber, d2dAdapter.remoteChipletID,
+         flit->originalPackets.size(), flit->payloadBytes, flit->paddingBytes,
          flit->isRetransmission ? "YES" : "NO",
-         d2dAdapter.txRetryBuffer.size(),
-         d2dAdapter.retryBufferCapacity);
+         d2dAdapter.txRetryBuffer.size(), d2dAdapter.retryBufferCapacity);
 
-    // Send across the wire (scheduled at linklatency in gem5 timing)
     bool sent = txPort.sendTimingReq(flit);
     if (!sent) {
         txBlocked = true;
-        warn("[UCIe TX] txPort.sendTimingReq blocked (downstream busy). "
-             "Flit seq=%u remains in retry buffer. Will retry on recvReqRetry.",
-             flit->sequenceNumber);
+        warn("[UCIe TX] sendTimingReq blocked. Will retry on recvReqRetry.");
     }
 }
+
 
 //  drainTxSendQueue - attempt to send all queued flits
 void UcieLink::drainTxSendQueue()
@@ -924,159 +950,118 @@ void UcieLink::drainTxSendQueue()
     }
 }
 
-//  processFlushEvent - 8-cycle timer fires, flush partial staging buffer
-void UcieLink::processFlushEvent()
-{
-    flushEventPending = false;
 
-    warn("[UCIe Flush] Timer fired after %lu cycles. "
-         "Staged bytes=%u.", flushTimerCycles, txPacker.stagedBytes());
-
-    UcieFlitPacket* flit = txPacker.forceFlush();
-    if(flit != nullptr) {
-        transmitFlit(flit);
-    }
-}
 
 // ================================================================================
 //  S8      ACK/NAK PROCESSING
 // ================================================================================
 
 // processAck - retire all retry buffer entreis upt to and including ackedSeqNum
-void UcieLink::processAck(uint8_t ackedSeqNum)
+void UcieLink::processAck(Tick ackedTimestamp)
 {
     size_t retired = 0;
-
     while (!d2dAdapter.txRetryBuffer.empty()) {
         UcieFlitPacket* front = d2dAdapter.txRetryBuffer.front();
-        if (front->sequenceNumber > ackedSeqNum) break;
-
-        warn("[UCIe ACK] Retiring flit seq=%u from retry buffer.",
-             front->sequenceNumber);
-
+        if (front->sequenceNumber > ackedTimestamp) break;
+        warn("[UCIe ACK] Retiring flit seq=%lu.", front->sequenceNumber);
         d2dAdapter.txRetryBuffer.pop_front();
-        delete front;   // Sender owns memory; safe to free now
+        delete front;
         ++retired;
     }
 
-    d2dAdapter.lastAckedSeqNum = ackedSeqNum;
+    d2dAdapter.lastAckedSeqNum = ackedTimestamp;
 
-    warn("[UCIe ACK] ACK seq=%u processed. Retired %zu flits. "
-         "Retry buffer depth=%zu.",
-         ackedSeqNum, retired, d2dAdapter.txRetryBuffer.size());
+    // Cancel timeout if retry buffer is now empty
+    if (d2dAdapter.txRetryBuffer.empty() && retryTimeoutEvent.scheduled()) {
+        deschedule(retryTimeoutEvent);
+        warn("[UCIe ACK] Retry buffer empty – timeout cancelled.");
+    }
 
-    // Credit returns are piggybacked in the ACK flit header
-    // (handled in recvTimingResp via the flit header fields)
+    warn("[UCIe ACK] ts=%lu processed. Retired %zu. RetryBuf=%zu.",
+         ackedTimestamp, retired, d2dAdapter.txRetryBuffer.size());
 
-    // Drain any queued flits now that retry buffer has space
     drainTxSendQueue();
 }
 
+
 // processNak - retransmit all flits from nakSeqNum onwards
-void UcieLink::processNak(uint8_t nakSeqNum)
+void UcieLink::processNak(Tick nakTimestamp)
 {
     stats.totalFlitsNaked++;
+    warn("[UCIe NAK] NAK ts=%lu. Retransmitting from retry buf (%zu flits).",
+         nakTimestamp, d2dAdapter.txRetryBuffer.size());
 
-    warn("[UCIe NAK] NAK received for seq=%u. "
-         "Retransmitting from retry buffer (%zu flits).",
-         nakSeqNum, d2dAdapter.txRetryBuffer.size());
-
-    // Find the NAK'd flit and retransmit from there
     bool found = false;
     for (UcieFlitPacket* flit : d2dAdapter.txRetryBuffer) {
-        if (flit->sequenceNumber >= nakSeqNum) {
+        if (flit->sequenceNumber >= nakTimestamp) {
             found = true;
             flit->isRetransmission = true;
-
-            warn("[UCIe NAK] Retransmitting flit seq=%u (originally %zu TLPs).",
-                 flit->sequenceNumber, flit->originalPackets.size());
-
-            // Re-generate CRC and re-send
+            warn("[UCIe NAK] Retransmitting flit seq=%lu.", flit->sequenceNumber);
             UcieCRC::generateFlitCRC(flit);
             bool sent = txPort.sendTimingReq(flit);
             if (!sent) {
-                warn("[UCIe NAK] Retransmit blocked — port busy. "
-                     "Will resume on recvReqRetry.");
                 txBlocked = true;
+                warn("[UCIe NAK] Retransmit blocked – will resume on retry.");
                 break;
             }
         }
     }
-
-    if (!found) {
-        warn("[UCIe NAK] WARNING: NAK for seq=%u but not found in retry buffer "
-             "(already ACKed?). Ignoring.", nakSeqNum);
-    }
+    if (!found)
+        warn("[UCIe NAK] ts=%lu not in retry buffer (already ACKed?).", nakTimestamp);
 }
+
 
 // sendAck - create and dispatch an ACK flit to the remote chiplet
 // Piggybacks credit returns in the flit header
-void UcieLink::sendAck(uint8_t ackedSeqNum)
+void UcieLink::sendAck(Tick ackedTimestamp)
 {
-    // ACK flits carry no TLP payload; size = UCIE_FLIT_SIZE_BYTES but
-    // payloadBytes = 0 and all payload bytes are zero-padded.
-    RequestPtr ackReq = std::make_shared<Request>(
-        0, UCIE_FLIT_SIZE_BYTES, 0, 0
-    );
-
+    RequestPtr req = std::make_shared<Request>(0, UCIE_FLIT_SIZE_BYTES, 0, 0);
     UcieFlitPacket* ack = new UcieFlitPacket(
-        ackReq, MemCmd::WriteReq, ackedSeqNum, FlitType::FLIT_LEVEL_ACK
-    );
+        req, MemCmd::WriteReq, ackedTimestamp, FlitType::FLIT_LEVEL_ACK);
 
-    ack->header.flitType         = FlitType::FLIT_LEVEL_ACK;
-    ack->header.ackNakValid      = true;
-    ack->header.ackNakSeqNum     = ackedSeqNum;
-    ack->header.srcID            = d2dAdapter.localChipletID;
-    ack->header.dstID            = d2dAdapter.remoteChipletID;
-    // Return all consumed credits (simplified: return all pending)
+    ack->header.flitType              = FlitType::FLIT_LEVEL_ACK;
+    ack->header.ackNakValid           = true;
+    ack->header.ackNakTimestamp       = ackedTimestamp;
+    ack->header.srcID                 = d2dAdapter.localChipletID;
+    ack->header.dstID                 = d2dAdapter.remoteChipletID;
     ack->header.headerCreditsReturned = 1;
-    ack->header.dataCreditsReturned   =
-        (UCIE_PAYLOAD_SIZE_BYTES + 3) / 4;   // in 4B units
-
-    ack->payloadBytes = 0;
-    ack->paddingBytes = UCIE_PAYLOAD_SIZE_BYTES;
+    ack->header.dataCreditsReturned   = (UCIE_PAYLOAD_SIZE_BYTES + 3) / 4;
+    ack->payloadBytes                 = 0;
+    ack->paddingBytes                 = UCIE_PAYLOAD_SIZE_BYTES;
     ack->makeResponse();
 
     stats.totalAcksSent++;
-
-    warn("[UCIe ACK] Sending ACK for seq=%u to chiplet %u. "
-         "HdrCredRet=%u DataCredRet=%u.",
-         ackedSeqNum,
-         d2dAdapter.remoteChipletID,
+    warn("[UCIe ACK] Sending ACK ts=%lu to chiplet %u. "
+         "hdrCred=%u dataCred=%u.",
+         ackedTimestamp, d2dAdapter.remoteChipletID,
          ack->header.headerCreditsReturned,
          ack->header.dataCreditsReturned);
-
     rxPort.sendTimingResp(ack);
 }
 
+
 // sendNak - create and dispatch a NAK flit requesting retransmission
-void UcieLink::sendNak(uint8_t nakSeqNum)
+void UcieLink::sendNak(Tick nakTimestamp)
 {
-    RequestPtr nakReq = std::make_shared<Request>(
-        0, UCIE_FLIT_SIZE_BYTES, 0, 0
-    );
-
+    RequestPtr req = std::make_shared<Request>(0, UCIE_FLIT_SIZE_BYTES, 0, 0);
     UcieFlitPacket* nak = new UcieFlitPacket(
-        nakReq, MemCmd::WriteReq, nakSeqNum, FlitType::FLIT_LEVEL_NAK
-    );
+        req, MemCmd::WriteReq, nakTimestamp, FlitType::FLIT_LEVEL_NAK);
 
-    nak->header.flitType     = FlitType::FLIT_LEVEL_NAK;
-    nak->header.ackNakValid  = true;
-    nak->header.ackNakSeqNum = nakSeqNum;
-    nak->header.srcID        = d2dAdapter.localChipletID;
-    nak->header.dstID        = d2dAdapter.remoteChipletID;
-    nak->payloadBytes        = 0;
-    nak->paddingBytes        = UCIE_PAYLOAD_SIZE_BYTES;
+    nak->header.flitType        = FlitType::FLIT_LEVEL_NAK;
+    nak->header.ackNakValid     = true;
+    nak->header.ackNakTimestamp = nakTimestamp;
+    nak->header.srcID           = d2dAdapter.localChipletID;
+    nak->header.dstID           = d2dAdapter.remoteChipletID;
+    nak->payloadBytes           = 0;
+    nak->paddingBytes           = UCIE_PAYLOAD_SIZE_BYTES;
     nak->makeResponse();
 
     stats.totalNaksSent++;
-
-    warn("[UCIe NAK] Sending NAK for seq=%u to chiplet %u. "
-         "Requesting retransmission.",
-         nakSeqNum, d2dAdapter.remoteChipletID);
-
+    warn("[UCIe NAK] Sending NAK ts=%lu to chiplet %u.",
+         nakTimestamp, d2dAdapter.remoteChipletID);
     rxPort.sendTimingResp(nak);
 }
+
 
 // ================================================================================
 //  S9 TX PORT CALLBACKS
@@ -1088,79 +1073,51 @@ UcieLink::UcieTxPort::UcieTxPort(const std::string& name, UcieLink* owner)
     : RequestPort(name), owner(owner) {}
 
 // recvTimingResp - ACK/NAK from remote chiplet, OR read data from memory
+
 bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
 {
-    // Try to interpret this response as a UCIe control flit
     UcieFlitPacket* ctrlFlit = dynamic_cast<UcieFlitPacket*>(pkt);
-
     if (ctrlFlit != nullptr) {
-        //  UCIe Control Flit (ACK or NAK) received
         if (ctrlFlit->header.flitType == FlitType::FLIT_LEVEL_ACK) {
-            warn("[UCIe TX Port] ACK received for seq=%u.",
-                 ctrlFlit->header.ackNakSeqNum);
-
-            // Process piggybacked credit returns
+            warn("[UCIe TX Port] ACK ts=%lu.", ctrlFlit->header.ackNakTimestamp);
             owner->d2dAdapter.creditManager.returnCredits(
                 ctrlFlit->header.headerCreditsReturned,
                 ctrlFlit->header.dataCreditsReturned,
-                ctrlFlit->header.msgClass
-            );
-
-            owner->processAck(ctrlFlit->header.ackNakSeqNum);
-
+                ctrlFlit->header.msgClass);
+            owner->processAck(ctrlFlit->header.ackNakTimestamp);
         } else if (ctrlFlit->header.flitType == FlitType::FLIT_LEVEL_NAK) {
-            warn("[UCIe TX Port] NAK received for seq=%u.",
-                 ctrlFlit->header.ackNakSeqNum);
-            owner->processNak(ctrlFlit->header.ackNakSeqNum);
-
+            warn("[UCIe TX Port] NAK ts=%lu.", ctrlFlit->header.ackNakTimestamp);
+            owner->processNak(ctrlFlit->header.ackNakTimestamp);
         } else {
             warn("[UCIe TX Port] Unexpected flit type=%u in recvTimingResp.",
                  static_cast<uint8_t>(ctrlFlit->header.flitType));
         }
-        delete ctrlFlit;   // Sender owns and frees ACK/NAK containers
+        delete ctrlFlit;
         return true;
     }
-
-    //  Standard memory read response — forward back to local CPU/cache
-    warn("[UCIe TX Port] Memory read response (addr=0x%llx size=%uB) "
-         "returning to local chiplet.",
+    warn("[UCIe TX Port] Memory read response (addr=0x%llx size=%uB).",
          (unsigned long long)pkt->getAddr(), pkt->getSize());
-
     return owner->rxPort.sendTimingResp(pkt);
 }
+
 
 // recvReqRetry - downstream became available; resume pending sends
 void UcieLink::UcieTxPort::recvReqRetry()
 {
-    warn("[UCIe TX Port] recvReqRetry — downstream unblocked. "
-         "Resuming. rxBuffer=%zu txSendQueue=%zu txRetryBuf=%zu.",
-         owner->d2dAdapter.rxBuffer.size(),
-         owner->txSendQueue.size(),
-         owner->d2dAdapter.txRetryBuffer.size());
-
+    warn("[UCIe TX Port] recvReqRetry – downstream unblocked.");
     owner->txBlocked = false;
 
-    // Priority 1: drain RX buffer (unpacked TLPs destined for memory)
     while (!owner->d2dAdapter.rxBuffer.empty()) {
         PacketPtr front = owner->d2dAdapter.rxBuffer.front();
-        bool sent = sendTimingReq(front);
-
-        if (sent) {
-            warn("[UCIe TX Port] Drained TLP from rxBuffer → memory "
-                 "(addr=0x%llx).", (unsigned long long)front->getAddr());
-            owner->d2dAdapter.rxBuffer.pop_front();
-        } else {
-            warn("[UCIe TX Port] Memory still busy. "
-                 "Stopping rxBuffer drain (%zu remaining).",
-                 owner->d2dAdapter.rxBuffer.size());
+        if (!sendTimingReq(front)) {
             owner->txBlocked = true;
             return;
         }
+        owner->d2dAdapter.rxBuffer.pop_front();
     }
-
-    // Priority 2: drain outgoing flit send queue
     owner->drainTxSendQueue();
 }
+
 
 // recvRangeChange - propagate address range updates upstream
 void UcieLink::UcieTxPort::recvRangeChange()
@@ -1183,22 +1140,13 @@ UcieLink::UcieRxPort::UcieRxPort(const std::string& name, UcieLink* owner)
 // recvAtomic - backdoor zero-latency access (functional/ atomic CPU mode)
 Tick UcieLink::UcieRxPort::recvAtomic(PacketPtr pkt)
 {
-    warn("[UCIe RX Port] recvAtomic: addr=0x%llx size=%uB — "
-         "forwarding with %lu tick latency.",
-         (unsigned long long)pkt->getAddr(),
-         pkt->getSize(),
-         owner->logicalPhy.linkLatency);
-
     return owner->txPort.sendAtomic(pkt) + owner->logicalPhy.linkLatency;
 }
+
 
 // recvFunctional - backdoor direct memory write (debugging)
 void UcieLink::UcieRxPort::recvFunctional(PacketPtr pkt)
 {
-    warn("[UCIe RX Port] recvFunctional: addr=0x%llx size=%uB — "
-         "bypassing flit layer.",
-         (unsigned long long)pkt->getAddr(), pkt->getSize());
-
     owner->txPort.sendFunctional(pkt);
 }
 
@@ -1216,278 +1164,178 @@ void UcieLink::UcieRxPort::recvFunctional(PacketPtr pkt)
 //      -> Verify CRC -> ACK or NAK -> unpack TLPs -> forward memory
 bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 {
-    // Classify the incoming packet
     UcieFlitPacket* incomingFlit = dynamic_cast<UcieFlitPacket*>(pkt);
 
-    //  ROLE B: Received UCIe Flit from remote chiplet
+    // ---- ROLE B: received UCIe flit from remote chiplet ----
     if (incomingFlit != nullptr) {
-
         owner->stats.totalFlitsReceived++;
-
-        warn("[UCIe RX Port] RECEIVER: Got UCIe flit seq=%u from chiplet %u. "
+        warn("[UCIe RX Port] RECEIVER: flit seq=%lu from chiplet %u "
              "type=%u payload=%uB.",
              incomingFlit->sequenceNumber,
              incomingFlit->header.srcID,
              static_cast<uint8_t>(incomingFlit->header.flitType),
              incomingFlit->payloadBytes);
 
-        // --- LINK_MGMT flit: process credit returns and discard ---
+        // LINK_MGMT: credit returns only
         if (incomingFlit->header.flitType == FlitType::LINK_MGMT) {
-            warn("[UCIe RX Port] LINK_MGMT flit received. "
-                 "Processing credit returns hdr=%u data=%u.",
-                 incomingFlit->header.headerCreditsReturned,
-                 incomingFlit->header.dataCreditsReturned);
-
             owner->d2dAdapter.creditManager.returnCredits(
                 incomingFlit->header.headerCreditsReturned,
                 incomingFlit->header.dataCreditsReturned,
-                incomingFlit->header.msgClass
-            );
+                incomingFlit->header.msgClass);
             delete incomingFlit;
             return true;
         }
 
-        // --- CRC Verification (UCIe Spec §7.6) ---
+        // CRC verification
         bool crcOk = UcieCRC::verifyFlitCRC(incomingFlit);
-
         if (!crcOk) {
-            // ---------------------------------------------------------------
-            //  CRC FAIL path: issue NAK, discard corrupted flit
-            // ---------------------------------------------------------------
             owner->stats.totalCrcErrors++;
-
-            warn("[UCIe RX Port] RECEIVER: CRC FAIL on flit seq=%u! "
-                 "Sending NAK. Total CRC errors so far: %lu.",
+            warn("[UCIe RX Port] CRC FAIL seq=%lu. Sending NAK. Total=%lu.",
                  incomingFlit->sequenceNumber,
                  (unsigned long)owner->stats.totalCrcErrors.value());
-
             owner->sendNak(incomingFlit->sequenceNumber);
-            delete incomingFlit;   // Discard corrupted flit
+            delete incomingFlit;
             return true;
         }
-
-        // --- CRC PASS path: ACK + unpack ---
-        warn("[UCIe RX Port] RECEIVER: CRC PASS on flit seq=%u. "
-             "Sending ACK and unpacking %zu TLPs.",
-             incomingFlit->sequenceNumber,
-             incomingFlit->originalPackets.size());
-
-        // Send ACK with piggybacked credit returns
+        // CRC OK: ACK and unpack
+        warn("[UCIe RX Port] CRC PASS seq=%lu. Sending ACK.", incomingFlit->sequenceNumber);
         owner->sendAck(incomingFlit->sequenceNumber);
 
-        // Unpack TLPs using the FlitUnpacker
         std::vector<PacketPtr> tlps =
             owner->rxUnpacker.processReceivedFlit(incomingFlit);
 
-        // Push extracted TLPs into RX buffer (respects back-pressure)
         for (PacketPtr tlp : tlps) {
             if (owner->d2dAdapter.rxBuffer.size() >=
                 owner->d2dAdapter.rxBufferMaxDepth) {
-                warn("[UCIe RX Port] RX buffer full (%zu/%u)! "
-                     "Dropping TLP addr=0x%llx — BACK-PRESSURE.",
-                     owner->d2dAdapter.rxBuffer.size(),
-                     owner->d2dAdapter.rxBufferMaxDepth,
-                     (unsigned long long)tlp->getAddr());
+                warn("[UCIe RX Port] RX buffer full – BACK-PRESSURE.");
                 break;
             }
             owner->d2dAdapter.rxBuffer.push_back(tlp);
         }
 
-        // Drain RX buffer → memory controller
         size_t drained = 0;
         while (!owner->d2dAdapter.rxBuffer.empty()) {
             PacketPtr front = owner->d2dAdapter.rxBuffer.front();
-            bool sent = owner->txPort.sendTimingReq(front);
-
-            if (sent) {
-                owner->d2dAdapter.rxBuffer.pop_front();
-                ++drained;
-            } else {
-                warn("[UCIe RX Port] Memory busy — "
-                     "%zu TLP(s) remain in RX buffer.",
-                     owner->d2dAdapter.rxBuffer.size());
-                break;
-            }
+            if (!owner->txPort.sendTimingReq(front)) break;
+            owner->d2dAdapter.rxBuffer.pop_front();
+            ++drained;
         }
-
-        warn("[UCIe RX Port] Drained %zu TLPs to memory this cycle. "
-             "RX buffer depth remaining=%zu.",
+        warn("[UCIe RX Port] Drained %zu TLPs. RX buf remaining=%zu.",
              drained, owner->d2dAdapter.rxBuffer.size());
 
-        // Do NOT delete incomingFlit: memory is owned by originalPackets
-        // which are now in rxBuffer / forwarded to memory
         delete incomingFlit;
         return true;
     }
 
-    // =========================================================================
-    //  ROLE A: Standard TLP from local CPU/cache → pack and send
-    // =========================================================================
-    warn("[UCIe RX Port] SENDER: TLP received from local stack. "
-         "addr=0x%llx size=%uB. Handing to FlitPacker.",
+    // ---- ROLE A: TLP from local CPU/cache → pack and schedule send ----
+    warn("[UCIe RX Port] SENDER: TLP addr=0x%llx size=%uB.",
          (unsigned long long)pkt->getAddr(), pkt->getSize());
 
-    // Guard: do not accept traffic if Adapter LSM is not ACTIVE
     if (owner->currentLinkState != AdapterLinkState::ACTIVE) {
-        warn("[UCIe RX Port] SENDER: Adapter LSM not ACTIVE (state=%s). "
-             "Dropping TLP.",
+        warn("[UCIe RX Port] Adapter not ACTIVE (%s). Dropping TLP.",
              adapterStateNames[static_cast<uint8_t>(owner->currentLinkState)]);
         return false;
     }
-
-    // Hand TLP to FlitPacker
+    // Pack the TLP
     UcieFlitPacket* readyFlit = owner->txPacker.processIncomingTLP(pkt);
-
     if (readyFlit != nullptr) {
-        // A complete flit was assembled — cancel any pending flush timer
-        if (owner->flushEvent.scheduled()) {
-            owner->deschedule(owner->flushEvent);
-            owner->flushEventPending = false;
-            warn("[UCIe RX Port] Flush timer cancelled (flit assembled naturally).");
-        }
-
-        warn("[UCIe RX Port] SENDER: Flit assembled (seq=%u). "
-             "Transmitting now.",
+        owner->txSendQueue.push_back(readyFlit);
+        warn("[UCIe RX Port] Flit seq=%lu queued for send.",
              readyFlit->sequenceNumber);
-
-        owner->transmitFlit(readyFlit);
     }
 
-    // If staging buffer has data and no timer is running, start the 8-cycle timer
-    if (owner->txPacker.hasData() && !owner->flushEvent.scheduled()) {
-        Tick fireAt = curTick() + owner->clockPeriod() * owner->flushTimerCycles;
-        owner->schedule(owner->flushEvent, fireAt);
-        owner->flushEventPending = true;
-
-        warn("[UCIe RX Port] SENDER: Partial staging buffer (%uB/%uB). "
-             "Flush timer scheduled for tick=%lu (%lu cycles).",
-             owner->txPacker.stagedBytes(),
-             UCIE_PAYLOAD_SIZE_BYTES,
-             fireAt,
-             owner->flushTimerCycles);
+    // [REF-PAPER] Schedule packTlpEvent at Maximum_Pri to trigger sendFlitEvent.
+    // This ensures intake processing happens before other same-tick events.
+    if (!owner->packTlpEvent.scheduled()) {
+        owner->schedule(owner->packTlpEvent, curTick());
     }
 
-    return true;   // Tell upstream we accepted the TLP
+    return true;
 }
 
 // recvRespRetry - upstream caller can retyr after we previously blocked
 void UcieLink::UcieRxPort::recvRespRetry()
 {
-    warn("[UCIe RX Port] recvRespRetry — propagating retry to TX port.");
     owner->txPort.sendRetryResp();
 }
 
 // getAddrRanges - transparent pass-through to whatever TX port connects to 
 AddrRangeList UcieLink::UcieRxPort::getAddrRanges() const
 {
-    AddrRangeList ranges = owner->txPort.getAddrRanges();
-    warn("[UCIe RX Port] getAddrRanges: forwarding %zu ranges from TX side.",
-         ranges.size());
-    return ranges;
+    return owner->txPort.getAddrRanges();
 }
+
 
 // ================================================================================
 //  S12     DIAGNOSTICS
 // ================================================================================
 void UcieLink::dumpLinkStatus() const
 {
-    warn("=== UCIe Link Status Dump [%s] ===", name().c_str());
+    warn("=== UCIe Link Status [%s] ===", name().c_str());
+    warn("  PHY State    : %s", phyStateNames[static_cast<uint8_t>(phyLinkState)]);
+    warn("  Adapter State: %s", adapterStateNames[static_cast<uint8_t>(currentLinkState)]);
 
-    // --- Physical Layer State ---
-    warn("  [PHY Layer - §4.5.3 Table 22]");
-    warn("  PHY State    : %s",
-         phyStateNames[static_cast<uint8_t>(phyLinkState)]);
-
-    // --- Adapter LSM State ---
-    warn("  [Adapter LSM - §3.4]");
-    warn("  Adapter State: %s",
-         adapterStateNames[static_cast<uint8_t>(currentLinkState)]);
-
-    // Spec §3.4 gating check — warn if hierarchy is violated
-    bool phyActive     = (phyLinkState     == PhyLinkState::ACTIVE);
-    bool adapterActive = (currentLinkState == AdapterLinkState::ACTIVE);
-    if (adapterActive && !phyActive) {
-        warn("  *** SPEC VIOLATION: Adapter is ACTIVE but PHY is not ACTIVE! "
-             "(UCIe Spec §3.4) ***");
+    if (currentLinkState == AdapterLinkState::ACTIVE &&
+        phyLinkState     != PhyLinkState::ACTIVE) {
+        warn("  *** SPEC VIOLATION: Adapter ACTIVE but PHY not ACTIVE! ***");
     }
 
-    // --- Chiplet identity ---
-    warn("  Local  ID    : %u", d2dAdapter.localChipletID);
+    warn("  Local ID     : %u", d2dAdapter.localChipletID);
     warn("  Remote ID    : %u", d2dAdapter.remoteChipletID);
-    warn("  Lane Width   : x%d @ %.1f GT/s",
-         logicalPhy.linkWidth, logicalPhy.dataRateGbps);
+    warn("  Lane Width   : x%d @ %.1f GT/s", logicalPhy.linkWidth, logicalPhy.dataRateGbps);
     warn("  Link Latency : %lu ticks", logicalPhy.linkLatency);
-    warn("  Eff. BW      : %.3f GB/s",
+    warn("  Eff BW       : %.3f GB/s",
          logicalPhy.linkWidth * logicalPhy.dataRateGbps / 8.0);
-
-    // --- TX pipeline ---
     warn("  TX Blocked   : %s", txBlocked ? "YES" : "NO");
     warn("  Retry Buffer : %zu / %u flits",
          d2dAdapter.txRetryBuffer.size(), d2dAdapter.retryBufferCapacity);
-    warn("  Last ACK'd   : seq=%u", d2dAdapter.lastAckedSeqNum);
+    warn("  Last ACK'd   : ts=%lu", d2dAdapter.lastAckedSeqNum);
     warn("  RX Buffer    : %zu / %u TLPs",
          d2dAdapter.rxBuffer.size(), d2dAdapter.rxBufferMaxDepth);
-    warn("  TX SendQueue : %zu flits pending", txSendQueue.size());
+    warn("  TX SendQueue : %zu flits", txSendQueue.size());
     warn("  Staging      : %u / %u bytes",
          txPacker.stagedBytes(), UCIE_PAYLOAD_SIZE_BYTES);
-    warn("  Flush Timer  : %s (%lu cycles)",
-         flushEventPending ? "RUNNING" : "IDLE", flushTimerCycles);
+    warn("  sendFlit     : %s", sendFlitEvent.scheduled() ? "SCHEDULED" : "IDLE");
+    warn("  RetryTimeout : %s", retryTimeoutEvent.scheduled() ? "RUNNING" : "IDLE");
 
-    // --- Credit pools (per message class) ---
-    warn("  [Credit Pools - UCIe Spec §7.5]");
     const char* clsNames[] = { "NPR", "PR ", "CPL" };
-    for (int cls = 0; cls < UcieCreditManager::NUM_MSG_CLASSES; ++cls) {
-        warn("  Credits[%s]  : txAvail=%u  rxGranted=%u  rxConsumed=%u",
-             clsNames[cls],
-             d2dAdapter.creditManager.pools[cls].txAvailable,
-             d2dAdapter.creditManager.pools[cls].rxGranted,
-             d2dAdapter.creditManager.pools[cls].rxConsumed);
+    for (int c = 0; c < UcieCreditManager::NUM_MSG_CLASSES; ++c) {
+        warn("  Credits[%s]  : txAvail=%u rxGranted=%u rxConsumed=%u",
+             clsNames[c],
+             d2dAdapter.creditManager.pools[c].txAvailable,
+             d2dAdapter.creditManager.pools[c].rxGranted,
+             d2dAdapter.creditManager.pools[c].rxConsumed);
     }
 
-    // --- Statistics ---
-    warn("  [Statistics - aligned with REF-PAPER evaluation metrics]");
-    warn("  Flits Sent       : %lu",
-         (unsigned long)stats.totalFlitsSent.value());
-    warn("  TLPs Sent        : %lu",
-         (unsigned long)stats.totalTLPsSent.value());
-    warn("  Payload Bytes    : %lu",
-         (unsigned long)stats.totalPayloadBytes.value());
-    warn("  Padding Bytes    : %lu",
-         (unsigned long)stats.totalPaddingBytes.value());
+    warn("  Flits Sent   : %lu", (unsigned long)stats.totalFlitsSent.value());
+    warn("  TLPs Sent    : %lu", (unsigned long)stats.totalTLPsSent.value());
+    warn("  Payload B    : %lu", (unsigned long)stats.totalPayloadBytes.value());
+    warn("  Padding B    : %lu", (unsigned long)stats.totalPaddingBytes.value());
 
-    // Payload efficiency — guard against division by zero
-    uint64_t totalBytes = (uint64_t)stats.totalPayloadBytes.value()
-                        + (uint64_t)stats.totalPaddingBytes.value();
-    if (totalBytes > 0) {
-        double eff = 100.0 * stats.totalPayloadBytes.value() / totalBytes;
-        warn("  Payload Eff.     : %.2f%%  (spec max = %.2f%%)",
-             eff,
+    uint64_t totalB = stats.totalPayloadBytes.value() + stats.totalPaddingBytes.value();
+    if (totalB > 0)
+        warn("  Payload Eff  : %.2f%% (spec max=%.2f%%)",
+             100.0 * stats.totalPayloadBytes.value() / totalB,
              100.0 * UCIE_PAYLOAD_SIZE_BYTES / UCIE_FLIT_SIZE_BYTES);
-    } else {
-        warn("  Payload Eff.     : N/A (no flits sent yet)");
-    }
+    else
+        warn("  Payload Eff  : N/A");
 
-    warn("  Retransmissions  : %lu  (%.4f%% of flits sent)",
+    warn("  Retransmits  : %lu (%.4f%%)",
          (unsigned long)stats.totalRetransmissions.value(),
          stats.totalFlitsSent.value() > 0
-             ? 100.0 * stats.totalRetransmissions.value()
-               / stats.totalFlitsSent.value()
-             : 0.0);
-    warn("  NAKs Received    : %lu",
-         (unsigned long)stats.totalFlitsNaked.value());
-    warn("  Flits Received   : %lu",
-         (unsigned long)stats.totalFlitsReceived.value());
-    warn("  CRC Errors (RX)  : %lu  (%.4f%% of flits received)",
+             ? 100.0 * stats.totalRetransmissions.value() /
+               stats.totalFlitsSent.value() : 0.0);
+    warn("  NAKs Recv    : %lu", (unsigned long)stats.totalFlitsNaked.value());
+    warn("  Flits Recv   : %lu", (unsigned long)stats.totalFlitsReceived.value());
+    warn("  CRC Errors   : %lu (%.4f%%)",
          (unsigned long)stats.totalCrcErrors.value(),
          stats.totalFlitsReceived.value() > 0
-             ? 100.0 * stats.totalCrcErrors.value()
-               / stats.totalFlitsReceived.value()
-             : 0.0);
-    warn("  ACKs Sent        : %lu",
-         (unsigned long)stats.totalAcksSent.value());
-    warn("  NAKs Sent        : %lu",
-         (unsigned long)stats.totalNaksSent.value());
+             ? 100.0 * stats.totalCrcErrors.value() /
+               stats.totalFlitsReceived.value() : 0.0);
+    warn("  ACKs Sent    : %lu", (unsigned long)stats.totalAcksSent.value());
+    warn("  NAKs Sent    : %lu", (unsigned long)stats.totalNaksSent.value());
     warn("=== End UCIe Link Status [%s] ===", name().c_str());
 }
+
 
 } // namespace gem5

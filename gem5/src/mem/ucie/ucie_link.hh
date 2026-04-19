@@ -23,7 +23,7 @@
 //      * Max data rate     :  32 GT/s per lane (Advanced package)
 //      * Link widths       :  x2, x4, x8, x16 (Standard) / x64 (Advanced)
 //      * Flow control      :  Credit-based (header credits + data credits)
-//      * Error recover     :  Flit-level Retry (FLR) with ACK/NAK protocol
+//      * Error recover     :  Flit-level Retry (FLR) with ACK/NAK protocol + timeout
 //
 // ================================================================================
 
@@ -195,10 +195,11 @@ struct UcieFlitHeader
     ProtocolType    protocol;           // Protocol stack selector
     FlitType        flitType;           // Flit category (see enum above)
 
-    uint8_t     seqNum;                 // 7-bit sequence number [0-127]
-                                        // Wraps modulo retryBufferCapacity
+    // Optimized: Using Tick to avoid wrap-around and track latency
+    Tick        timestampSeqNum;    
+
     bool        ackNakValid;            // True when ackNakSeqNum is meaningful
-    uint16_t    ackNakSeqNum;           // Sequence number being ACK'd or NAK'd
+    Tick        ackNakTimestamp;        // Replacing 16-bit ackNakSeqNum
 
     // Credit return fields - piggybacked on every flit 
     uint8_t     headerCreditsReturned;  // Header credit slots returned to sender
@@ -209,7 +210,7 @@ struct UcieFlitHeader
         : srcID(0), dstID(0),
           msgClass(MessageClass::NPR), protocol(ProtocolType::PCIE),
           flitType(FlitType::NULL_FLIT),
-          seqNum(0), ackNakValid(false), ackNakSeqNum(0),
+          timestampSeqNum(0), ackNakValid(false), ackNakTimestamp(0),
           headerCreditsReturned(0), dataCreditsReturned(0)
     {}
 };
@@ -255,7 +256,7 @@ class UcieFlitPacket : public Packet
                                             // crcGroups[3]     = link status
         
         //  3.3     Retry Buffer Metadata 
-        uint8_t sequenceNumber;             // 7-bit flit sequence number (0..127)
+        Tick sequenceNumber;                // Timestamp sequence number 
         bool    crcValid;                   // True if CRC check passed on receive
         bool    isRetransmission;           // True if this flit is being replayed
                                             // from the retry buffer (not first send)
@@ -290,7 +291,7 @@ class UcieFlitPacket : public Packet
               crcValid(false), isRetransmission(false),
               isFirstSegment(true), isLastSegment(true), isMiddleSegment(false)
         {
-            header.seqNum   = seq_num;
+            header.timestampSeqNum   = seq_num;
             header.flitType = type;
             crcGroups.fill(0);
             allocate(); // Allocated 256 bytes in gem5's memory pool
@@ -423,10 +424,12 @@ class FlitPacker
         // Reset sequence numbering (called on link reset / retrain)
         void resetSequenceCounter() { nextSequenceNumber = 0; }
 
+        bool isStagingBufferEmpty() const {return stagingBuffer.empty() && segementResidue.empty(); }
+
     private:
         //  6.3     Internal State
         uint32_t                currentBytes;           // Bytes accumulated in staging
-        uint8_t                 nextSequenceNumber;     // Next flit seq num (7-bit, wraps)
+        Tick                    nextSequenceNumber;     // timestamp-based; set per pack
         std::vector<PacketPtr>  stagingBuffer;          // TLPs waiting to be packed
         std::vector<uint8_t>    segementResidue;        // Leftover bytes from a segement TLP
 
@@ -437,7 +440,7 @@ class FlitPacker
         UcieFlitPacket* assembleFlit(bool isPartial);
 
         // Assign the next 7-bit sequence number (wraps at UCIE_MAX_SEQ_NUM)
-        uint8_t assignSequenceNumber();
+        Tick assignTimestampSequence();
 };
 
 // ================================================================================
@@ -547,7 +550,7 @@ class UcieLink : public ClockedObject
             std::deque<UcieFlitPacket*> txRetryBuffer;
 
             // Highest ACK's sequence number (flits <= this value may be retired)
-            uint8_t lastAckedSeqNum;
+            Tick lastAckedSeqNum;
 
             // RX Buffer - holds unpacked TLPs waiting to be forwarded to memory
             std::deque<PacketPtr> rxBuffer;
@@ -651,35 +654,28 @@ class UcieLink : public ClockedObject
         //  8.8     ACK / NAK PROCESSING 
         
         // Retires all txRetryBuffer entries with seqNum <= ackedSeqNum
-        void processAck(uint8_t ackedSeqNum);
+        void processAck(Tick ackedSeqNum);
 
         // Retransmits all txRetryBuffer entries with seqNum >= nakSeqNum
-        void processNak(uint8_t nakSeqNum);
+        void processNak(Tick nakSeqNum);
 
         // Generate and send an ACK flit piggybacked with credit returns
-        void sendAck(uint8_t ackedSeqNum);
+        void sendAck(Tick ackedSeqNum);
 
         // Generate and send a NAK flit for a CRC-failed received flit
-        void sendNak(uint8_t nakSeqNum);
+        void sendNak(Tick nakSeqNum);
 
-        //  8.8     8-CYCLE FLIT ASSEMBLY TIMER 
-        //
-        //  If the staging buffer is non-empty but has not filled to 236B within 
-        //  flushTimerCycles clock cycles, this event fires to force a partial
-        //  flit flush with padding, bounding maximum TLP latency.
-        void processFlushEvent();
+        // Task-based event handlers
+        void processPackTlp();
+        void processSendFlit();
+        void processRetryTimeout();
 
-        // Number of cycles before a partial flit is force-flushed
-        // (spec-recommended default: 8; configurable via Python parameter)
-        Tick flushTimerCycles;              // 8
-        
-        // True when flushEvent has been scheduled not yet fired
-        bool flushEventPending;             // 9
+        // Event objects
+        EventFunctionWrapper packTlpEvent;
+        EventFunctionWrapper sendFlitEvent;
+        EventFunctionWrapper retryTimeoutEvent;
 
-        // The gem5 event object - declared LAST in this group because its 
-        // constructor lambda captures 'this'; all members it touched must
-        // already exist when the EventFunctionWrapper is constructed.
-        EventFunctionWrapper flushEvent;    // 10
+        Tick retryTimeoutDelay;
 
         //  8.9     GEM5 STATISTICS 
         //
