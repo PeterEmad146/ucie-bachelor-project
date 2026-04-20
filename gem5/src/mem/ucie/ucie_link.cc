@@ -293,7 +293,7 @@ UcieFlitPacket* FlitPacker::assembleFlit(bool isPartial)
 //      4. If staging buffer is exactly full: flush immediately
 UcieFlitPacket* FlitPacker::processIncomingTLP(PacketPtr pkt)
 {
-    warn("[UCIe Packer] Incoming TLP size=%Ub. Currently staged=%uB.",
+    warn("[UCIe Packer] Incoming TLP size=%ub. Currently staged=%uB.",
          pkt->getSize(), currentBytes);
 
     UcieFlitPacket* flit = nullptr;
@@ -381,7 +381,6 @@ std::vector<PacketPtr> FlitUnpacker::processReceivedFlit(UcieFlitPacket* flit)
          "(payload=%uB, padding=%uB). firstSeg=%s lastSeg=%s.",
          flit->sequenceNumber,
          flit->originalPackets.size(),
-         flit->payloadBytes,
          flit->payloadBytes,
          flit->paddingBytes,
          flit->isFirstSegment ? "true" : "false",
@@ -932,7 +931,7 @@ void UcieLink::transmitFlit(UcieFlitPacket* flit)
 //  drainTxSendQueue - attempt to send all queued flits
 void UcieLink::drainTxSendQueue()
 {
-    warn("[UCIe TX] drainTxSendQueue: %zu flits queued.", txSendQueue.size());
+    warn("[UCIe TX] drainTxSendQueue: %lu flits queued.", (unsigned long)txSendQueue.size());
     
     while (!txSendQueue.empty()) {
         UcieFlitPacket* front = txSendQueue.front();
@@ -1182,7 +1181,6 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
                 incomingFlit->header.headerCreditsReturned,
                 incomingFlit->header.dataCreditsReturned,
                 incomingFlit->header.msgClass);
-            delete incomingFlit;
             return true;
         }
 
@@ -1194,15 +1192,14 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
                  incomingFlit->sequenceNumber,
                  (unsigned long)owner->stats.totalCrcErrors.value());
             owner->sendNak(incomingFlit->sequenceNumber);
-            delete incomingFlit;
             return true;
         }
+
+        std::vector<PacketPtr> tlps = owner->rxUnpacker.processReceivedFlit(incomingFlit);
+
         // CRC OK: ACK and unpack
         warn("[UCIe RX Port] CRC PASS seq=%lu. Sending ACK.", incomingFlit->sequenceNumber);
         owner->sendAck(incomingFlit->sequenceNumber);
-
-        std::vector<PacketPtr> tlps =
-            owner->rxUnpacker.processReceivedFlit(incomingFlit);
 
         for (PacketPtr tlp : tlps) {
             if (owner->d2dAdapter.rxBuffer.size() >=
@@ -1223,7 +1220,6 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         warn("[UCIe RX Port] Drained %zu TLPs. RX buf remaining=%zu.",
              drained, owner->d2dAdapter.rxBuffer.size());
 
-        delete incomingFlit;
         return true;
     }
 

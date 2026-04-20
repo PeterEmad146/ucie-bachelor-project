@@ -352,8 +352,8 @@ class UcieCreditManager
 
         // Header credit initial values set during link training
         // (negotiated; typical initial value = 8 per message class)
-        static constexpr uint32_t INITIAL_HEADER_CREDITS    = 8;
-        static constexpr uint32_t INITIAL_DATA_CREDITS      = 32;   // in 4B units
+        static constexpr uint32_t INITIAL_HEADER_CREDITS    = 1024;
+        static constexpr uint32_t INITIAL_DATA_CREDITS      = 8192;   
 
         // API used by UcieLink
         UcieCreditManager();

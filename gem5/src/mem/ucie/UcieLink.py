@@ -27,7 +27,7 @@ class UcieLink(ClockedObject):
 
     # [REF-PAPER] Timeout before automatic single-retry retransmission.
     # Chosen large enough to cover typical ACK round-trip latency.
-    retry_timeout_delay   = Param.Latency('100ns',
+    retry_timeout_delay   = Param.Latency('25ns',
                                 "Timeout before automatic retransmission")
 
     # Number of flits held in the retry buffer pending ACK (count, not bytes)
@@ -44,7 +44,7 @@ class UcieLink(ClockedObject):
                                 "Negotiated data rate string (informational)")
 
     # Bit-error rate injected per flit for testing. 0.0 = error-free.
-    error_rate            = Param.Float(1^-10,
+    error_rate            = Param.Float(1e-10,
                                 "Per-flit CRC corruption probability (0=off)")
 
     data_rate_gbps        = Param.Float(64.0,
