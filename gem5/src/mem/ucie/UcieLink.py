@@ -40,14 +40,14 @@ class UcieLink(ClockedObject):
     link_width            = Param.Int(16,
                                 "Link width in lanes")
 
-    data_rate             = Param.String('16GT/s',
+    data_rate             = Param.String('64GT/s',
                                 "Negotiated data rate string (informational)")
 
     # Bit-error rate injected per flit for testing. 0.0 = error-free.
-    error_rate            = Param.Float(0.0,
+    error_rate            = Param.Float(1^-10,
                                 "Per-flit CRC corruption probability (0=off)")
 
-    data_rate_gbps        = Param.Float(32.0,
+    data_rate_gbps        = Param.Float(64.0,
                                 "Per-lane data rate in Gbps")
 
     rx_buffer_depth       = Param.Unsigned(64,
