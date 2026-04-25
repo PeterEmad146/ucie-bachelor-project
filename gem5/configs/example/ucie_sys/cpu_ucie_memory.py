@@ -6,7 +6,7 @@ system = System()
 system.clk_domain = SrcClockDomain(clock='1GHz', voltage_domain=VoltageDomain())
 system.mem_mode = 'timing'
 system.cache_line_size = 64 
-system.mem_ranges = [AddrRange('512MiB')]
+system.mem_ranges = [AddrRange('16GiB')]
 
 # --- CHIPLET 0 (CPU Side) ---
 system.cpu = X86TimingSimpleCPU()
@@ -15,10 +15,10 @@ system.membus = SystemXBar()
 system.cpu.icache_port = system.membus.cpu_side_ports
 system.cpu.dcache_port = system.membus.cpu_side_ports
 
+# Updated to only use our optimized parameters
 system.ucie_link_0 = UcieLink(
-    link_latency='2ns', data_rate='64GT/s', data_rate_gbps=64.0,
-    flit_size=256, link_width=16, error_rate=0.0,
-    local_chiplet_id=0, remote_chiplet_id=1
+    retry_timeout='25ns', 
+    error_rate=0.0
 )
 
 # Wire CPU out to Link 0 in
@@ -26,10 +26,10 @@ system.membus.mem_side_ports = system.ucie_link_0.rx_port
 
 
 # --- CHIPLET 1 (Memory Side) ---
+# Updated to only use our optimized parameters
 system.ucie_link_1 = UcieLink(
-    link_latency='0ns', data_rate='64GT/s', data_rate_gbps=64.0,
-    flit_size=256, link_width=16, error_rate=0.0,
-    local_chiplet_id=1, remote_chiplet_id=0
+    retry_timeout='25ns', 
+    error_rate=0.0
 )
 
 system.mem_ctrl = MemCtrl()

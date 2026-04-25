@@ -60,12 +60,17 @@ system.ucie_link_tx.tx_port = system.ucie_link_rx.rx_port
 system.ucie_link_rx.tx_port = system.mem_ctrl.port
 
 # 8. Generate the Traffic Configuration dynamically
-# Each packet is injected every 1000 ticks.
-duration_ticks = args.iterations * 1000
+# TARGET BANDWIDTH: 100 GB/s (Safe zone to prevent queue deadlock)
+# 100 GB/s = 1 byte every 10 picoseconds (ticks).
+# Therefore, the perfect period for ANY packet size is (size * 10) ticks.
+injection_period = args.tlp_size * 128
+
+# Calculate total duration based on dynamic period
+duration_ticks = args.iterations * injection_period
 
 cfg_file = f"traffic_cfg_{args.tlp_size}B.cfg"
 with open(cfg_file, "w") as f:
-    f.write(f"STATE 0 {duration_ticks} RANDOM 0 0 268435456 {payload_size} 1000 1000\n")
+    f.write(f"STATE 0 {duration_ticks} RANDOM 0 0 268435456 {payload_size} {injection_period} {injection_period}\n")
     f.write("STATE 1 100000 IDLE\n")
     f.write("INIT 0\n")
     f.write("TRANSITION 0 1 1.0\n")
@@ -78,15 +83,10 @@ root = Root(full_system=False, system=system)
 m5.instantiate()
 
 if args.iterations == 0:
-    print("Iterations set to 0. Exiting without simulating traffic.")
     exit(0)
 
-print(f"Starting UCIe Latency Test for TLP Size: {args.tlp_size}B over {args.iterations} iterations [cite: 152, 157]")
-
-# Calculate the exact tick when the simulation should forcefully shut down.
-# We add 500,000 extra ticks (0.5 microseconds) to allow the final flit 
-# to cross the link, get verified, and trigger its ACK response.
-max_sim_ticks = duration_ticks + 500000 
+# Massive tick buffer to allow the final 4096B packets to finish their round trip
+max_sim_ticks = duration_ticks + 50000000 
 exit_event = m5.simulate(max_sim_ticks)
 
 print(f"Exiting @ tick {m5.curTick()} because {exit_event.getCause()} (or reached tick limit)")
