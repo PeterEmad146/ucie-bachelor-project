@@ -195,6 +195,21 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
     // Convert nanoseconds back to gem5 Ticks
     Tick mathDelayTicks = (Tick)((transmission_ns + accumulation_ns) * 1000.0);
 
+    // FIX: Prevent Double-Counting the Transmission Delay
+    // The FlitSender physically staggers the flits by 8 cycles (32ns at 250MHz).
+    // We subtract this physical pipeline delay from the initial math delay
+    // so that the *last* flit arrives at exactly the theoretical time.
+    uint32_t numFlits = (tlpSize + UCIE_PAYLOAD_SIZE_BYTES - 1) / UCIE_PAYLOAD_SIZE_BYTES; 
+    Tick physicalStaggeringTicks = (numFlits - 1) * owner->clockEdge(Cycles(8));
+
+    if (mathDelayTicks > physicalStaggeringTicks) {
+        mathDelayTicks -= physicalStaggeringTicks;
+    } else {
+        // If the physical transmission of the required flit headers takes longer 
+        // than the idealized theoretical formula, send immediately.
+        mathDelayTicks = 0; 
+    }
+
     // 2. Process the TLP
     owner->txPacker.processIncomingTLP(pkt);
     
@@ -414,10 +429,11 @@ void UcieLink::processNak(Tick nakTimestamp)
 
 void UcieLink::processRetryTimeout()
 {
-    // NEW: If the port is locally congested, pause timeouts.
-    // "When the link is congested... the transmission of the flit packet is temporarily paused" [cite: 291, 292]
+    // 1. If congested, pause timeouts safely
     if (txBlocked) {
-        schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+        if (!retryTimeoutEvent.scheduled()) {
+            schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+        }
         return;
     }
 
@@ -426,7 +442,6 @@ void UcieLink::processRetryTimeout()
         
         if (curTick() >= oldest_timestamp + retryTimeoutDelay) {
             // THE MODIFICATION: Single Retry Mechanism
-            // Send ONE probe flit instead of flushing the whole buffer.
             UcieFlitPacket* probeFlit = retryBuffer.front();
             
             auto dummy_req = std::make_shared<Request>(0, UCIE_PAYLOAD_SIZE_BYTES, 0, 0);
@@ -442,14 +457,23 @@ void UcieLink::processRetryTimeout()
 
             if (txPort.sendTimingReq(wireFlit)) {
                 stats.totalRetransmissions++;
-                // Reschedule for this specific flit
-                schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+                // FIX: Only schedule if a synchronous ACK hasn't already scheduled it!
+                if (!retryTimeoutEvent.scheduled()) {
+                    schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+                }
             } else {
                 delete wireFlit;
                 txBlocked = true; 
+                // FIX: Ensure the timeout loop continues even if we got blocked
+                if (!retryTimeoutEvent.scheduled()) {
+                    schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+                }
             }
         } else {
-            schedule(retryTimeoutEvent, oldest_timestamp + retryTimeoutDelay);
+            // FIX: Guard the false-alarm reschedule
+            if (!retryTimeoutEvent.scheduled()) {
+                schedule(retryTimeoutEvent, oldest_timestamp + retryTimeoutDelay);
+            }
         }
     }
 }
