@@ -18,6 +18,12 @@
 namespace gem5
 {
 
+// Custom SenderState to track end-to-end TLP latency
+struct UcieTimerState: public Packet::SenderState {
+    Tick entryTime;
+    UcieTimerState(Tick t) : entryTime(t) {}
+};
+
 // 1. Simplified State Machine:
 enum class UcieLinkState : uint8_t
 {
@@ -47,7 +53,8 @@ enum class ProtocolType : uint8_t
 };
 
 // Fixed flit dimensions from the paper
-static constexpr uint32_t UCIE_FLIT_SIZE_BYTES = 256;
+// changed the flit size to 236 for optimized simulation
+static constexpr uint32_t UCIE_FLIT_SIZE_BYTES = 236;
 static constexpr uint32_t UCIE_PAYLOAD_SIZE_BYTES = 236;
 
 // 4. Flit Packet
@@ -171,6 +178,7 @@ class UcieLink : public ClockedObject
         // Core Queues
         bool txBlocked;          
         bool rxWaitingForRetry;   
+        Tick lastProcessedTimestamp;
         std::deque<UcieFlitPacket*> txSendQueue;
         std::deque<UcieFlitPacket*> retryBuffer;
         Tick lastAckedTimestamp;
@@ -213,12 +221,16 @@ class UcieLink : public ClockedObject
             statistics::Scalar totalFlitsReceived;      // Flits received from txPort
             statistics::Scalar totalCrcErrors;          // Flits failing CRC check
             statistics::Scalar totalAcksSent;           // ACK flits generated
-            statistics::Scalar totalNaksSent;           // NAK flits generated
+            statistics::Scalar totalNaksSent;  
+            
+            statistics::Scalar totalTLPsReceived;       // TLPs successfully unpacked// NAK flits generated
+            statistics::Histogram tlpLatency;           // End-to-end latency timer
 
             //  Derived metrics (Formula = auto-computed from Scalars)
             statistics::Formula payloadEfficiency;      // totalPayloadBytes / (totalPayloadBytes + totalPaddingBytes)
             statistics::Formula retransmissionRate;     // totalRetransmissions / totalFlitsSent
             statistics::Formula crcErrorRate;           // totalCrcError / totalFlitsReceived
+
         } stats;
 
     public:

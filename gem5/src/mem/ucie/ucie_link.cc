@@ -146,9 +146,27 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
             }
         }
 
-        // 3. NORMAL OPERATION (CRC Passed)
+        // 3. DUPLICATE FLIT REJECTION 
+        // If the sender's timeout was too aggressive, we drop flits we've already processed
+        if (owner->rxFlitCounter > 0 && flit->timestamp <= owner->lastProcessedTimestamp) {
+            owner->sendAck(owner->lastProcessedTimestamp);  // Re-ack to calm the sender
+            delete flit;
+            return true;
+        }
+
+        owner->lastProcessedTimestamp = flit->timestamp;
+        owner->rxFlitCounter++;
+
+        // 4. NORMAL OPERATION (CRC Passed)
         std::vector<PacketPtr> originalPkts = owner->rxUnpacker.processReceivedFlit(flit);
         for (auto* tlp : originalPkts) {
+            // Stop the timer and record the latency
+            auto* timerState = dynamic_cast<UcieTimerState*>(tlp->popSenderState());
+            if (timerState) {
+                owner->stats.tlpLatency.sample(curTick() - timerState->entryTime);
+                delete timerState;  // Clean up memory!
+            }
+            owner->stats.totalTLPsReceived++;
             owner->txPort.sendTimingReq(tlp);
         }
         
@@ -159,20 +177,40 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 
     // Otherwise, it is a local TLP from the CPU. Pack it!
     owner->stats.totalTLPsSent++;
+
+    // Start the latency timer by pushing our SenderState
+    pkt->pushSenderState(new UcieTimerState(curTick()));
+
+    // 1. Calculate Latency mathematically as defined in the paper
+    uint32_t tlpSize = pkt->getSize() + 16; 
+    double transmission_ns = (double)tlpSize / 8.0; 
+
+    // Retrieve the clock period of this Link dynamically (gem5 default Tick is 1ps)
+    double T_ns = (double) owner->clockPeriod() / 1000.0;
+    double f_GHz = 1.0 / T_ns;
+
+    // Apply the simplified summation formula: t_accumulation = 16 - (1 / 2f)
+    double accumulation_ns = 16.0 - (1.0 / (2.0*f_GHz));
+
+    // Convert nanoseconds back to gem5 Ticks
+    Tick mathDelayTicks = (Tick)((transmission_ns + accumulation_ns) * 1000.0);
+
+    // 2. Process the TLP
     owner->txPacker.processIncomingTLP(pkt);
     
-    // NEW: Build as many FULL flits as possible immediately (handles huge DMA blocks)
     while (owner->txPacker.stagedBytes() >= UCIE_PAYLOAD_SIZE_BYTES) {
         UcieFlitPacket* fullFlit = owner->txPacker.assembleFlit(false);
         owner->txSendQueue.push_back(fullFlit);
         
         if (!owner->sendFlitEvent.scheduled()) {
-            owner->schedule(owner->sendFlitEvent, owner->clockEdge(Cycles(8)));
+            // Apply the mathematical delay here!
+            owner->schedule(owner->sendFlitEvent, curTick() + mathDelayTicks);
         }
     }
 
     if (!owner->packTlpEvent.scheduled() && owner->txPacker.stagedBytes() > 0) {
-        owner->schedule(owner->packTlpEvent, owner->clockEdge(Cycles(10))); 
+        // Apply the mathematical delay here!
+        owner->schedule(owner->packTlpEvent, curTick() + mathDelayTicks); 
     }
     return true;
 }
@@ -200,6 +238,7 @@ UcieLink::UcieLink(const UcieLinkParams& p)
       rxFlitCounter(0),
       txBlocked(false),
       rxWaitingForRetry(false),
+      lastProcessedTimestamp(0),
       lastAckedTimestamp(0),
       packTlpEvent([this]{ processPackTlp(); }, name()),
       sendFlitEvent([this]{ processSendFlit(); }, name()),
@@ -235,7 +274,7 @@ void UcieLink::processPackTlp()
     if (flit) {
         txSendQueue.push_back(flit);
         if (!sendFlitEvent.scheduled()) {
-            schedule(sendFlitEvent, clockEdge(Cycles(8)));
+            schedule(sendFlitEvent, curTick()); // Send immediately
         }
     }
 }
@@ -349,17 +388,20 @@ void UcieLink::processNak(Tick nakTimestamp)
 {
     stats.totalFlitsNaked++;
     
-    // Move flits sent AFTER the nakTimestamp back to the front of the txSendQueue
+    // DOWNSTREAM FIX 1: The NAK contains the last CORRECT flit. 
+    // We must process it as an ACK first to clear successful flits from the buffer.
+    processAck(nakTimestamp);
+    
+    // Move remaining unacknowledged flits back to the txSendQueue
     while (!retryBuffer.empty()) {
         UcieFlitPacket* replayFlit = retryBuffer.back();
-        if (replayFlit->timestamp >= nakTimestamp) {
-            replayFlit->isRetransmission = true;
-            txSendQueue.push_front(replayFlit); 
-            stats.totalRetransmissions++;
-            retryBuffer.pop_back();
-        } else {
-            break; 
-        }
+        
+        // DOWNSTREAM FIX 2: Since we called processAck above, everything left 
+        // in the retryBuffer is guaranteed to be > nakTimestamp. 
+        replayFlit->isRetransmission = true;
+        txSendQueue.push_front(replayFlit); 
+        stats.totalRetransmissions++;
+        retryBuffer.pop_back();
     }
     
     // Clear the timeout since we are handling the error now
@@ -372,14 +414,41 @@ void UcieLink::processNak(Tick nakTimestamp)
 
 void UcieLink::processRetryTimeout()
 {
+    // NEW: If the port is locally congested, pause timeouts.
+    // "When the link is congested... the transmission of the flit packet is temporarily paused" [cite: 291, 292]
+    if (txBlocked) {
+        schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+        return;
+    }
+
     if (!retryBuffer.empty()) {
         Tick oldest_timestamp = retryBuffer.front()->timestamp;
         
-        // Did it TRULY expire, or did it just get pushed back by continuous traffic?
         if (curTick() >= oldest_timestamp + retryTimeoutDelay) {
-            processNak(lastAckedTimestamp);
+            // THE MODIFICATION: Single Retry Mechanism
+            // Send ONE probe flit instead of flushing the whole buffer.
+            UcieFlitPacket* probeFlit = retryBuffer.front();
+            
+            auto dummy_req = std::make_shared<Request>(0, UCIE_PAYLOAD_SIZE_BYTES, 0, 0);
+            UcieFlitPacket* wireFlit = new UcieFlitPacket(
+                dummy_req, MemCmd::WriteReq, probeFlit->timestamp, probeFlit->flitType
+            );
+            wireFlit->payloadBytes = probeFlit->payloadBytes;
+            wireFlit->originalPackets = probeFlit->originalPackets;
+            wireFlit->isRetransmission = true;
+            
+            Tick delay = clockEdge(Cycles(8)) - curTick();
+            wireFlit->headerDelay += delay;
+
+            if (txPort.sendTimingReq(wireFlit)) {
+                stats.totalRetransmissions++;
+                // Reschedule for this specific flit
+                schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
+            } else {
+                delete wireFlit;
+                txBlocked = true; 
+            }
         } else {
-            // False alarm. Reschedule for its actual expiration time.
             schedule(retryTimeoutEvent, oldest_timestamp + retryTimeoutDelay);
         }
     }
@@ -401,11 +470,18 @@ UcieLink::UcieStats::UcieStats(UcieLink* parent)
       ADD_STAT(totalCrcErrors, statistics::units::Count::get(), "Total CRC Errors Triggered"),
       ADD_STAT(totalAcksSent, statistics::units::Count::get(), "Total ACKs Sent"),
       ADD_STAT(totalNaksSent, statistics::units::Count::get(), "Total NAKs Sent"),
+      ADD_STAT(totalTLPsReceived, statistics::units::Count::get(), "Total TLPs Successfully Unpacked"),
+      ADD_STAT(tlpLatency, statistics::units::Tick::get(), "End-to-End TLP Latency (Ticks)"),
       ADD_STAT(payloadEfficiency, statistics::units::Ratio::get(), "Payload Efficiency"),
       ADD_STAT(retransmissionRate, statistics::units::Ratio::get(), "Retransmission Rate"),
       ADD_STAT(crcErrorRate, statistics::units::Ratio::get(), "CRC Error Rate")
 {
-    payloadEfficiency = totalPayloadBytes / (totalPayloadBytes + totalPaddingBytes);
+
+    // Initialize the histogram with a specific number of buckets 
+    // This gives gem5 the memory footprint it needs to track the latency distribution
+    tlpLatency.init(50);
+
+    payloadEfficiency = totalPayloadBytes / (totalFlitsSent * UCIE_FLIT_SIZE_BYTES);
     retransmissionRate = totalRetransmissions / totalFlitsSent;
     crcErrorRate = totalCrcErrors / totalFlitsReceived;
 }

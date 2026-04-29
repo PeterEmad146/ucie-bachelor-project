@@ -1,10 +1,15 @@
 Import('*')
 
-# Register the Python SimObject file
+# =========================
+# Python SimObjects
+# =========================
 SimObject('UcieLink.py', sim_objects=['UcieLink'])
-
-# Register the C++ source files
+# =========================
+# C++ Sources
+# =========================
 Source('ucie_link.cc')
 
-# Add debug flags if you plan to use them for timeline tracing
+# =========================
+# Debug Flags (optional)
+# =========================
 DebugFlag('UcieLink')
