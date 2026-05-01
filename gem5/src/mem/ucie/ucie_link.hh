@@ -178,6 +178,9 @@ class UcieLink : public ClockedObject
         // Core Queues
         bool txBlocked;          
         bool rxWaitingForRetry;   
+        bool tlpBlocked;
+        std::deque<PacketPtr> tlpSendQueue;
+
         Tick lastProcessedTimestamp;
         std::deque<UcieFlitPacket*> txSendQueue;
         std::deque<UcieFlitPacket*> retryBuffer;
@@ -196,6 +199,7 @@ class UcieLink : public ClockedObject
 
         // Transmission Helpers
         void drainTxSendQueue();
+        void drainTlpSendQueue();
         void transmitFlit(UcieFlitPacket* flit);
 
         // ACK/NAK Handlers

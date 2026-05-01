@@ -37,7 +37,9 @@ bool UcieLink::UcieTxPort::recvTimingResp(PacketPtr pkt)
 void UcieLink::UcieTxPort::recvReqRetry()
 {
     owner->txBlocked = false;
+    owner->tlpBlocked = false;
     owner->drainTxSendQueue();
+    owner->drainTlpSendQueue();
 }
 
 void UcieLink::UcieTxPort::recvRangeChange()
@@ -167,8 +169,10 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
                 delete timerState;  // Clean up memory!
             }
             owner->stats.totalTLPsReceived++;
-            owner->txPort.sendTimingReq(tlp);
+            owner->tlpSendQueue.push_back(tlp);
+            ///owner->txPort.sendTimingReq(tlp);
         }
+        owner->drainTlpSendQueue();
         
         owner->sendAck(flit->timestamp);
         delete flit;
@@ -183,7 +187,8 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
 
     // 1. Calculate Latency mathematically as defined in the paper
     uint32_t tlpSize = pkt->getSize() + 16; 
-    double transmission_ns = (double)tlpSize / 8.0; 
+    uint32_t firstChunkSize = std::min(tlpSize, (uint32_t)UCIE_PAYLOAD_SIZE_BYTES);
+    double transmission_ns = (double)firstChunkSize / 8.0; 
 
     // Retrieve the clock period of this Link dynamically (gem5 default Tick is 1ps)
     double T_ns = (double) owner->clockPeriod() / 1000.0;
@@ -193,22 +198,7 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
     double accumulation_ns = 16.0 - (1.0 / (2.0*f_GHz));
 
     // Convert nanoseconds back to gem5 Ticks
-    Tick mathDelayTicks = (Tick)((transmission_ns + accumulation_ns) * 1000.0);
-
-    // FIX: Prevent Double-Counting the Transmission Delay
-    // The FlitSender physically staggers the flits by 8 cycles (32ns at 250MHz).
-    // We subtract this physical pipeline delay from the initial math delay
-    // so that the *last* flit arrives at exactly the theoretical time.
-    uint32_t numFlits = (tlpSize + UCIE_PAYLOAD_SIZE_BYTES - 1) / UCIE_PAYLOAD_SIZE_BYTES; 
-    Tick physicalStaggeringTicks = (numFlits - 1) * owner->clockEdge(Cycles(8));
-
-    if (mathDelayTicks > physicalStaggeringTicks) {
-        mathDelayTicks -= physicalStaggeringTicks;
-    } else {
-        // If the physical transmission of the required flit headers takes longer 
-        // than the idealized theoretical formula, send immediately.
-        mathDelayTicks = 0; 
-    }
+    Tick startDelayTicks = (Tick)((transmission_ns + accumulation_ns) * 1000.0);
 
     // 2. Process the TLP
     owner->txPacker.processIncomingTLP(pkt);
@@ -219,13 +209,13 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         
         if (!owner->sendFlitEvent.scheduled()) {
             // Apply the mathematical delay here!
-            owner->schedule(owner->sendFlitEvent, curTick() + mathDelayTicks);
+            owner->schedule(owner->sendFlitEvent, curTick() + startDelayTicks);
         }
     }
 
     if (!owner->packTlpEvent.scheduled() && owner->txPacker.stagedBytes() > 0) {
         // Apply the mathematical delay here!
-        owner->schedule(owner->packTlpEvent, curTick() + mathDelayTicks); 
+        owner->schedule(owner->packTlpEvent, curTick() + startDelayTicks); 
     }
     return true;
 }
@@ -253,6 +243,7 @@ UcieLink::UcieLink(const UcieLinkParams& p)
       rxFlitCounter(0),
       txBlocked(false),
       rxWaitingForRetry(false),
+      tlpBlocked(false),
       lastProcessedTimestamp(0),
       lastAckedTimestamp(0),
       packTlpEvent([this]{ processPackTlp(); }, name()),
@@ -351,6 +342,21 @@ void UcieLink::drainTxSendQueue()
 {
     if (!sendFlitEvent.scheduled()) {
         schedule(sendFlitEvent, clockEdge(Cycles(1)));
+    }
+}
+
+void UcieLink::drainTlpSendQueue()
+{
+    while (!tlpSendQueue.empty() && !tlpBlocked) {
+        PacketPtr tlp = tlpSendQueue.front();
+        if (txPort.sendTimingReq(tlp)) {
+            // Successfully sent to the memory bus
+            tlpSendQueue.pop_front();
+        } else {
+            // The memory bus is congested. Stop sending and wait.
+            tlpBlocked = true;
+            break;
+        }
     }
 }
 

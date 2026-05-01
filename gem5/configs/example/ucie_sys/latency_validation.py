@@ -6,7 +6,7 @@ import os
 # Table I Data Sizes: 16, 48, 80, 112, 240, 496, 880, 1008, 2032, 4080
 # Because your C++ code does 'tlpSize = pkt->getSize() + 16', 
 # setting DATA_SIZE = 48 will correctly generate a 64B TLP.
-DATA_SIZE = 4080
+DATA_SIZE = 16
 
 # Generate a heavily spaced-out TrafficGen config to prevent queueing
 cfg_file = f"latency_test_{DATA_SIZE}B.cfg"
