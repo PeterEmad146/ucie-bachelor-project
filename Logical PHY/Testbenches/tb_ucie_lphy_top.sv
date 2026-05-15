@@ -7,7 +7,7 @@ module tb_ucie_lphy_top();
     // =========================================================================
     // 1. SIGNAL DECLARATIONS 
     // =========================================================================
-    logic lclk, rst_n, soc_reset_n;
+    logic lclk, sb_clk, rst_n, soc_reset_n;
 
     // RDI Datapath
     logic         lp_valid, lp_irdy;
@@ -120,6 +120,7 @@ module tb_ucie_lphy_top();
     // 3. CLOCKS, WATCHDOG & LOOPBACKS
     // =========================================================================
     initial begin lclk = 0; forever #5 lclk = ~lclk; end
+    initial begin sb_clk = 0; forever #0.625 sb_clk = ~sb_clk; end // 800 MHz sideband clock
 
     initial begin
         #500_000;

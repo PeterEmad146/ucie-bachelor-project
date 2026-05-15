@@ -16,3 +16,4 @@ gem5/traffic_cfg_32B.cfg
 gem5/traffic_cfg_4096B.cfg
 gem5/traffic_cfg_512B.cfg
 gem5/traffic_cfg_64B.cfg
+UCIe_Synth

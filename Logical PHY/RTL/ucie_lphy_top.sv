@@ -20,6 +20,7 @@ module ucie_lphy_top #(
     // 1. GLOBAL CLOCKS AND RESET
     // =========================================================================
     input  logic lclk,                  // Local processing clock (Byte-rate)
+    input  logic sb_clk,                // Fixed 800 MHz Sideband clock
     input  logic rst_n,                 // Active-low asynchronous reset
     input  logic soc_reset_n,           // System-level reset
 
@@ -451,7 +452,7 @@ module ucie_lphy_top #(
     // 3. SIDEBAND CONTROLLER (Physical MAC)
     // =========================================================================
     lphy_sb_ctrl u_sb_ctrl (
-        .lclk          (lclk),
+        .lclk          (sb_clk),
         .rst_n         (rst_n),
         .rdi_in_reset  (int_pl_state_sts == 4'b0000),
         
