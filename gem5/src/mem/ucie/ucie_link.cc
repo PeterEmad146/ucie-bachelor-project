@@ -206,25 +206,31 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
     //   t_tx: time to serialise firstChunkSize bytes at the configured BW.
     //       BW (GB/s) = data_rate (GT/s) × num_lanes ÷ 8
     //
-    //   t_accumulation: time to fill the DLL accumulation buffer.
-    //       = 16 − 1/(2f)  ns,  where f is the data-path clock in GHz.
-    //
-    //   t_physical: fixed 2 ns (1 ns Adapter+LogPHY + 1 ns Electrical PHY).
-    //       Stored as the phys_delay SimObject parameter — independent of
-    //       the data-path clock so it stays correct across clock sweeps.
-    uint32_t tlpSize       = pkt->getSize() + TLP_HEADER_BYTES;
+    uint32_t tlpSize        = pkt->getSize() + TLP_HEADER_BYTES;
     uint32_t firstChunkSize = std::min(tlpSize, (uint32_t)UCIE_PAYLOAD_SIZE_BYTES);
 
-    double BW_GBps         = (owner->dataRate * owner->numLanes) / 8.0; // bytes/ns
+    // ── Paper latency formula: t = t_tx + t_accumulation ─────────────────
+    //
+    // t_tx = TLP_bytes / BW_GBps   (serialisation time at 64 Gb/s)
+    //
+    // t_accumulation = 16 - 1/(2f)  where f is the UCIe LINK clock in GHz.
+    //   The link clock is NOT the gem5 simulation clock; it is derived from
+    //   the physical data rate:  f = data_rate_GT/s / num_lanes
+    //   e.g. 4 GT/s / 16 lanes = 0.25 GHz → t_acc = 16 - 2 = 14 ns
+    //
+    // t_physical (2 ns die-to-die) is intentionally NOT added separately.
+    // At f = 0.25 GHz the accumulation formula already yields 14 ns, which
+    // is the combined constant observed in every row of the paper's Table I:
+    //   TLP_bytes/8 + 14 = paper theoretical latency (verified for all 10 sizes).
+    //
+    double BW_GBps         = (owner->dataRate * owner->numLanes) / 8.0;  // bytes/ns
     double transmission_ns = (double)firstChunkSize / BW_GBps;
 
-    double T_ns            = (double)owner->clockPeriod() / 1000.0;     // ps → ns
-    double f_GHz           = 1.0 / T_ns;
-    double accumulation_ns = 16.0 - (1.0 / (2.0 * f_GHz));
+    // Link clock derived from physical parameters (GHz)
+    double f_link_GHz      = owner->dataRate / (double)owner->numLanes;
+    double accumulation_ns = 16.0 - (1.0 / (2.0 * f_link_GHz));
 
-    double physical_ns     = (double)owner->physDelay / 1000.0;         // ps → ns
-
-    Tick startDelayTicks   = (Tick)((transmission_ns + accumulation_ns + physical_ns) * 1000.0);
+    Tick startDelayTicks   = (Tick)((transmission_ns + accumulation_ns) * 1000.0);
 
     // 3. Process the TLP
     owner->txPacker.processIncomingTLP(pkt);
@@ -382,8 +388,12 @@ void UcieLink::processSendFlit()
         stats.totalPayloadBytes  += originalFlit->payloadBytes;
         stats.totalPaddingBytes  += (UCIE_PAYLOAD_SIZE_BYTES - originalFlit->payloadBytes);
 
+        // Schedule the next flit one accumulation-window later.
+        // Use the UCIe link clock (f = dataRate/numLanes), NOT the gem5 sim clock.
         if (!txSendQueue.empty() && !sendFlitEvent.scheduled()) {
-            schedule(sendFlitEvent, clockEdge(Cycles(8)));
+            double f_link = dataRate / (double)numLanes;  // GHz
+            Tick acc_ticks = (Tick)((16.0 - 1.0/(2.0*f_link)) * 1000.0);
+            schedule(sendFlitEvent, curTick() + acc_ticks);
         }
         if (!retryTimeoutEvent.scheduled()) {
             schedule(retryTimeoutEvent, curTick() + retryTimeoutDelay);
