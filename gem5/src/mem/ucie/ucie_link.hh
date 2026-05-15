@@ -24,11 +24,12 @@ struct UcieTimerState: public Packet::SenderState {
     UcieTimerState(Tick t) : entryTime(t) {}
 };
 
-// 1. Simplified State Machine:
+// 1. Link State Machine
 enum class UcieLinkState : uint8_t
 {
-    INIT = 0,   // Link is initializing 
-    ACTIVE = 1  // Normal Operation - ready to process flits
+    INIT    = 0,   // Link is initializing
+    ACTIVE  = 1,   // Normal operation — ready to process flits
+    RETRAIN = 2    // Error recovery — blocks new TLPs while replaying retry buffer
 };
 
 //  2. Flit Type 
@@ -52,10 +53,21 @@ enum class ProtocolType : uint8_t
     UNDEFINED   = 0xFF
 };
 
-// Fixed flit dimensions from the paper
-// changed the flit size to 236 for optimized simulation
-static constexpr uint32_t UCIE_FLIT_SIZE_BYTES = 236;
-static constexpr uint32_t UCIE_PAYLOAD_SIZE_BYTES = 236;
+// Fixed flit dimensions — UCIe spec §4.1
+static constexpr uint32_t UCIE_FLIT_SIZE_BYTES    = 256;  // Total wire flit (bytes)
+static constexpr uint32_t UCIE_PAYLOAD_SIZE_BYTES  = 236;  // Usable TLP payload
+static constexpr uint32_t UCIE_DLP_BYTES           = 6;   // Data Link Layer Packet header
+static constexpr uint32_t UCIE_CRC_BYTES           = 4;   // CRC field
+static constexpr uint32_t UCIE_RESERVED_BYTES      = 10;  // Reserved bytes
+// Compile-time check: all fields must sum to the total wire flit size
+static_assert(
+    UCIE_PAYLOAD_SIZE_BYTES + UCIE_DLP_BYTES + UCIE_CRC_BYTES + UCIE_RESERVED_BYTES
+    == UCIE_FLIT_SIZE_BYTES,
+    "UCIe flit field sizes must sum to 256 bytes");
+
+// TLP header overhead added on top of the raw data payload
+static constexpr uint32_t TLP_HEADER_BYTES = 16;
+
 
 // 4. Flit Packet
 
@@ -170,23 +182,37 @@ class UcieLink : public ClockedObject
 
         UcieLinkState linkState;
 
-        // Error modeling
-        double errorRate;      
-        uint64_t rxFlitCounter;
+        // ── Physical-layer parameters (from UcieLink.py) ──────────────────
+        double   dataRate;      // GT/s per lane
+        int      numLanes;      // Number of mainband data lanes
+        Tick     physDelay;     // Fixed physical layer delay in Ticks (ps)
+        int      creditPool;    // Total flow-control credits advertised
 
+        // ── Error modeling ─────────────────────────────────────────────────
+        double   errorRate;       // Bit error rate
+        uint64_t rxFlitCounter;   // Flits received counter
+        uint64_t rxBitsReceived;  // Cumulative bits received (for deterministic BER)
+        uint64_t nextErrorAtBits; // Bit threshold at which next CRC error fires
 
-        // Core Queues
-        bool txBlocked;          
-        bool rxWaitingForRetry;   
+        // ── Credit-based flow control ──────────────────────────────────────
+        uint32_t txCredits;    // Credits currently available to send
+
+        // ── Core queues & flags ────────────────────────────────────────────
+        bool txBlocked;
+        bool rxWaitingForRetry;
         bool tlpBlocked;
-        std::deque<PacketPtr> tlpSendQueue;
-
-        Tick lastProcessedTimestamp;
+        std::deque<PacketPtr>       tlpSendQueue;
         std::deque<UcieFlitPacket*> txSendQueue;
         std::deque<UcieFlitPacket*> retryBuffer;
+
+        Tick lastProcessedTimestamp;
         Tick lastAckedTimestamp;
 
-        // Task-based event handlers matching the paper's scheduling
+        // ── Throughput tracking ────────────────────────────────────────────
+        Tick simStartTick;   // Tick of the first flit sent
+        Tick simLastTick;    // Tick of the most recent flit sent
+
+        // ── Event handlers ─────────────────────────────────────────────────
         void processPackTlp();
         EventFunctionWrapper packTlpEvent;
 
@@ -197,16 +223,17 @@ class UcieLink : public ClockedObject
         EventFunctionWrapper retryTimeoutEvent;
         Tick retryTimeoutDelay;
 
-        // Transmission Helpers
+        // ── Transmission helpers ───────────────────────────────────────────
         void drainTxSendQueue();
         void drainTlpSendQueue();
         void transmitFlit(UcieFlitPacket* flit);
 
-        // ACK/NAK Handlers
+        // ── ACK / NAK / Credit handlers ────────────────────────────────────
         void processAck(Tick ackedTimestamp);
         void processNak(Tick nakTimestamp);
         void sendAck(Tick ackedTimestamp);
         void sendNak(Tick nakTimestamp);
+        void sendCreditReturn();
 
         struct UcieStats : public statistics::Group
         {
@@ -227,13 +254,19 @@ class UcieLink : public ClockedObject
             statistics::Scalar totalAcksSent;           // ACK flits generated
             statistics::Scalar totalNaksSent;  
             
-            statistics::Scalar totalTLPsReceived;       // TLPs successfully unpacked// NAK flits generated
-            statistics::Histogram tlpLatency;           // End-to-end latency timer
+            statistics::Scalar totalTLPsReceived;    // TLPs successfully unpacked
+            statistics::Histogram tlpLatency;        // End-to-end TLP latency (Ticks/ps)
 
-            //  Derived metrics (Formula = auto-computed from Scalars)
-            statistics::Formula payloadEfficiency;      // totalPayloadBytes / (totalPayloadBytes + totalPaddingBytes)
-            statistics::Formula retransmissionRate;     // totalRetransmissions / totalFlitsSent
-            statistics::Formula crcErrorRate;           // totalCrcError / totalFlitsReceived
+            // ── Throughput tracking ──────────────────────────────────────
+            statistics::Scalar simDurationTicks;     // Ticks from first to last flit sent
+
+            // ── Derived metrics ──────────────────────────────────────────
+            statistics::Formula payloadEfficiency;   // payload bytes / wire bytes
+            statistics::Formula retransmissionRate;  // retransmissions / flits sent
+            statistics::Formula crcErrorRate;        // CRC errors / flits received
+            // throughput (Gb/s) = totalPayloadBytes*8000 / simDurationTicks
+            // (8000 = 8 bits/byte × 1000 ps/ns; result is bits/ns = Gb/s)
+            statistics::Formula throughputGbps;
 
         } stats;
 
