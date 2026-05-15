@@ -30,32 +30,30 @@ TABLE_I_SIZES = [16, 48, 80, 112, 240, 496, 880, 1008, 2032, 4080]
 
 # Pick a single size for one run (override with --size= on the command line).
 # To reproduce the full table, loop over TABLE_I_SIZES in a shell script.
-DATA_SIZE = int(os.environ.get("UCIE_DATA_SIZE", 16))  # default 48 B → 64 B TLP
+DATA_SIZE = int(os.environ.get("UCIE_DATA_SIZE", 4080))  # default 48 B → 64 B TLP
 
-# UCIe physical parameters (match the UcieLink SimObject params below)
+# UCIe physical parameters (match UcieLink SimObject params below)
 DATA_RATE    = 4.0    # GT/s per lane
-NUM_LANES    = 16     # Standard UCIe package
+NUM_LANES    = 16     # Standard UCIe
+BW_Gbps      = DATA_RATE * NUM_LANES          # 64 Gbps
+F_GHz        = DATA_RATE / NUM_LANES          # 0.25 GHz (link clock)
 
-# UCIe link clock = data_rate / num_lanes (GHz) — used in the accumulation formula.
-# At 4 GT/s / 16 lanes = 0.25 GHz → t_acc = 16 - 1/(2×0.25) = 14 ns exactly.
-CLOCK_GHZ    = DATA_RATE / NUM_LANES
-BW_GBps      = (DATA_RATE * NUM_LANES) / 8.0   # bytes/ns = 8 GB/s
-
+# Paper formula: t = (TLP_Size × 8) / 64 + 16 - 1/(2F)
 tlp_size_bytes = DATA_SIZE + 16
-first_chunk    = min(tlp_size_bytes, 236)
-t_tx_ns        = first_chunk / BW_GBps
-t_acc_ns       = 16.0 - 1.0 / (2.0 * CLOCK_GHZ)
-t_theoretical  = t_tx_ns + t_acc_ns   # no separate t_physical (absorbed into t_acc at 0.25GHz)
+t_tx_ns        = (tlp_size_bytes * 8.0) / BW_Gbps   # full TLP serialization
+t_acc_ns       = 16.0 - 1.0 / (2.0 * F_GHz)         # = 14 ns at 0.25 GHz
+t_theoretical  = t_tx_ns + t_acc_ns
 
 print(f"\n{'='*60}")
 print(f"  UCIe Latency Validation — Table I")
 print(f"{'='*60}")
 print(f"  Payload  : {DATA_SIZE} B  |  TLP: {tlp_size_bytes} B")
-print(f"  f_link   : {CLOCK_GHZ} GHz  ({DATA_RATE}GT/s / {NUM_LANES} lanes)")
-print(f"  t_tx     : {t_tx_ns:.3f} ns  ({first_chunk}B / {BW_GBps}GB/s)")
-print(f"  t_acc    : {t_acc_ns:.3f} ns  (16 - 1/(2×{CLOCK_GHZ}))")
+print(f"  Formula  : ({tlp_size_bytes}B × 8) / {BW_Gbps:.0f}Gbps + 16 - 1/(2×{F_GHz})")
+print(f"  t_tx     : {t_tx_ns:.3f} ns")
+print(f"  t_acc    : {t_acc_ns:.3f} ns")
 print(f"  THEORY   : {t_theoretical:.3f} ns")
 print(f"{'='*60}\n")
+
 
 # ── TrafficGen config ─────────────────────────────────────────────────────────
 # Send one packet every 100 µs (100,000,000 ps) so packets never queue.
