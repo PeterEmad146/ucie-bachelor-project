@@ -1,7 +1,0 @@
-Metric,Value,Unit
-Total TLPs Packed,9999.0,Count
-Total Flits Sent,1282.0,Count
-Payload Efficiency,93.23%,Percentage
-CRC Errors (Drops),38.0,Count
-Retransmitted Flits,228.0,Count
-Go-Back-N Penalty Multiplier,6.0x,Ratio
