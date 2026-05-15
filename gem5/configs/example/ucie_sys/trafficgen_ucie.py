@@ -11,25 +11,35 @@ with open(cfg_file, "w") as f:
     f.write("TRANSITION 0 0 1\n")
 
 system = System()
-system.clk_domain = SrcClockDomain(clock='1GHz', voltage_domain=VoltageDomain())
+system.clk_domain = SrcClockDomain(clock='4GHz', voltage_domain=VoltageDomain())
 system.mem_mode = 'timing'
-system.cache_line_size = 64 
+system.cache_line_size = 64
 system.mem_ranges = [AddrRange('16GiB')]
+
 
 # --- CHIPLET 0 (DMA/TrafficGen Side) ---
 system.tgen = TrafficGen(config_file=cfg_file)
 
 system.ucie_link_0 = UcieLink(
-    retry_timeout='25ns', 
-    error_rate=0.0  # 5% error rate to test the retry buffer!
+    retry_timeout='25ns',
+    error_rate=0.0,
+    data_rate=4.0,
+    num_lanes=16,
+    phys_delay='2ns',
+    credit_pool=32,
 )
 
 system.tgen.port = system.ucie_link_0.rx_port
 
 # --- CHIPLET 1 (Memory Side) ---
+# error_rate=1e-10 injects BER as in the paper; the retry buffer handles recovery.
 system.ucie_link_1 = UcieLink(
-    retry_timeout='25ns', 
-    error_rate=0.05
+    retry_timeout='25ns',
+    error_rate=1e-10,
+    data_rate=4.0,
+    num_lanes=16,
+    phys_delay='2ns',
+    credit_pool=32,
 )
 
 system.mem_ctrl = MemCtrl()
