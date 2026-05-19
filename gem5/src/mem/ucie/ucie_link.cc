@@ -130,22 +130,22 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         owner->stats.totalFlitsReceived++;
 
         // 1. DETERMINISTIC BER ERROR INJECTION
-        // BER is defined per-lane. Each flit carries UCIE_FLIT_SIZE_BYTES × 8
-        // bits across numLanes lanes, but only UCIE_FLIT_SIZE_BYTES*8/numLanes
-        // bits travel on each individual lane.  Tracking per-lane bits ensures
-        // the error threshold matches the standard per-lane BER definition.
+        // BER is the aggregate bit error rate over all lanes combined.
+        // Each 256-byte flit transmits 256×8 = 2048 aggregate bits.
+        // One error fires every ceil(1/BER) aggregate bits:
+        //   At BER=1e-10: threshold = 1e10 × 2048 bits ≈ 4,882,813 flits.
+        // The BER test sends 10M packets (1 flit each) → fires ~2 errors.
         // (Retransmitted flits are immune — same as the paper's model.)
-        owner->rxBitsReceived += (UCIE_FLIT_SIZE_BYTES * 8) / owner->numLanes;
+        owner->rxBitsReceived += UCIE_FLIT_SIZE_BYTES * 8;   // 2048 aggregate bits
         bool crcError = (owner->errorRate > 0.0)
                      && !flit->isRetransmission
                      && !owner->rxWaitingForRetry
                      && (owner->rxBitsReceived >= owner->nextErrorAtBits);
 
         if (crcError) {
-            // Schedule the NEXT error: advance by another 1/BER per-lane bits.
+            // Advance threshold by another 1/BER aggregate bits for the next error.
             owner->nextErrorAtBits += (uint64_t)((1.0 / owner->errorRate)
-                                                  * UCIE_FLIT_SIZE_BYTES * 8
-                                                  / owner->numLanes);
+                                                  * UCIE_FLIT_SIZE_BYTES * 8);
             owner->stats.totalCrcErrors++;
             owner->rxWaitingForRetry = true;
             owner->sendNak(flit->timestamp);
@@ -308,16 +308,12 @@ void UcieLink::init()
     txCredits = (uint32_t)creditPool;
 
     // Deterministic BER: pre-compute the bit offset of the first error.
-    // BER is defined per-lane (industry standard): 1 error every 1/BER bits
-    // on a SINGLE lane.  With numLanes parallel lanes, the aggregate error
-    // probability per flit is numLanes × higher, so the threshold is:
-    //   nextErrorAtBits = ceil(1/BER) × flit_bits / numLanes
-    // At BER=1e-10, 16 lanes, 256 B flit:
-    //   = 1e10 × 2048 / 16 = 1.28×10¹² bits ≈ 625,000 flits (not 8M)
-    // This matches the paper's controlled error-injection methodology.
+    // The BER is modelled as an aggregate over all lanes: 1 error every
+    // ceil(1/BER) aggregate wire bits.  Each 256-byte flit = 2048 aggregate bits.
+    //   At BER=1e-10, 256B flit: threshold = 1e10 × 2048 ≈ 4,882,813 flits.
+    // The BER functional test sends 10M packets (1 flit each), firing ~2 errors.
     if (errorRate > 0.0) {
-        nextErrorAtBits = (uint64_t)((1.0 / errorRate)
-                          * UCIE_FLIT_SIZE_BYTES * 8 / numLanes);
+        nextErrorAtBits = (uint64_t)((1.0 / errorRate) * UCIE_FLIT_SIZE_BYTES * 8);
     }
 
     // NOTE: The UCIe sideband channel (800 MHz fixed clock, used for link

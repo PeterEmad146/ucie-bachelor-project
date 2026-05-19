@@ -21,18 +21,23 @@ import os
 
 # ── How many bits until the first error? ─────────────────────────────────────
 BER            = 1e-10
-FLIT_BITS      = 256 * 8       # 2048 bits per 256-byte flit (across all lanes)
-NUM_LANES      = 16
-# Per-lane BER means: 1 error every 1/BER bits on ONE lane.
-# Aggregate error fires after: ceil(1/BER) × flit_bits / num_lanes
-#   = 1e10 × 2048 / 16 = 1.28×10¹² per-lane bits ≈ 625,000 flits
-# We send 10M packets (1 flit each, 64B < 256B flit) → safely triggers several errors.
-PACKETS_NEEDED = 10_000_000
-PACKET_SIZE    = 64            # bytes (each packet occupies exactly 1 flit)
-INTERVAL_PS    = 500           # ps between packets (high throughput)
+FLIT_BITS      = 256 * 8   # 2048 aggregate bits per 256-byte flit (all lanes)
+# Aggregate BER model: 1 error every ceil(1/BER) aggregate bits.
+#   threshold = 1e10 × 2048 = 2.048×10¹³ bits ≈ 4,882,813 flits
+#
+# DRAM bottleneck note: with INTERVAL_PS=500ps (2 Gpkt/s) the DRAM write queue
+# saturates and only ~35% of generated packets reach the link receiver.
+# Fix: set INTERVAL_PS to match the UCIe link’s per-packet time:
+#   t_per_pkt = (64B × 8b) / 64Gbps = 8ns = 8000ps
+# At 8000ps/packet the link is fully loaded but DRAM can keep up.
+# We need 6M packets delivered; generate 7M with 10% margin.
+PACKETS_NEEDED = 7_000_000
+PACKET_SIZE    = 64        # bytes (each 64B packet occupies exactly 1 UCIe flit)
+INTERVAL_PS    = 8_000     # ps — matches UCIe link rate for 64B packets (8ns/pkt)
 
 cfg_file = "/tmp/ber_retry.cfg"
 with open(cfg_file, "w") as f:
+    # State 0 lasts PACKETS_NEEDED × INTERVAL_PS ticks, then transitions to EXIT.
     f.write(
         f"STATE 0 {PACKETS_NEEDED * INTERVAL_PS} LINEAR 0 0 536870912 "
         f"{PACKET_SIZE} {INTERVAL_PS} {INTERVAL_PS} 0\n"
@@ -76,11 +81,10 @@ m5.instantiate()
 print(f"\n{'='*60}")
 print(f"  UCIe BER Retry Functional Test")
 print(f"{'='*60}")
-print(f"  BER (per-lane) = {BER}  →  1 error per {int(1/BER):,} per-lane bits")
-print(f"  Flit bits (all lanes) = {FLIT_BITS:,}")
-print(f"  Per-lane bits per flit = {FLIT_BITS // NUM_LANES:,}")
-print(f"  Error interval = {int(1/BER) // (FLIT_BITS // NUM_LANES):,} flits")
-print(f"  Sending ~{PACKETS_NEEDED:,} packets to trigger several errors")
+print(f"  BER (aggregate) = {BER}  →  1 error per {int(1/BER):,} aggregate bits")
+print(f"  Flit bits (aggregate, all lanes) = {FLIT_BITS:,}")
+print(f"  Error fires every {int(1/BER) * FLIT_BITS // 1_000_000_000_000:.0f}.{(int(1/BER) * FLIT_BITS // 1_000_000_000) % 1000:03d} trillion bits = {int(1/BER * FLIT_BITS) // FLIT_BITS:,} flits")
+print(f"  Sending {PACKETS_NEEDED:,} packets  →  expect ~{PACKETS_NEEDED // (int(1/BER)):1.0f} error(s)")
 print(f"{'='*60}\n")
 print("  Expected results:")
 print("    totalCrcErrors      >= 1")
