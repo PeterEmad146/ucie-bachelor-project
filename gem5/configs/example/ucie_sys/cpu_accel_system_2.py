@@ -1,12 +1,23 @@
 """
-Test 2b: CNN Conv2D Offload via UCIe
-=====================================
-Same topology as cpu_accel_system.py but with a Conv2D memory access pattern
-instead of GEMM — reads Input Feature Maps + Kernel Weights, writes Output
-Feature Maps.  This reproduces the Conv2d row of the paper's Table II.
+Test 2b: CPU-Accelerator Conv2D Offload via UCIe
+=================================================
+Same dual-chiplet topology as cpu_accel_system.py but with a Conv2D
+memory-access pattern instead of GEMM:
+  - Read Input Feature Maps (IFM)
+  - Read Kernel Weights (highly reused, small)
+  - IDLE — 2D sliding-window MAC compute
+  - Write Output Feature Maps (OFM)
 
-Run:
-    build/X86/gem5.opt configs/example/ucie_sys/cpu_accel_system_2.py
+This models the Conv2d row of the paper's Table II.
+
+Address map:
+  CPU local DDR : 0 – 8 GiB    (direct, does NOT cross UCIe)
+  Accelerator HBM: 8 – 16 GiB  (all UCIe-bound traffic goes here)
+
+Run variants:
+    UCIE_MEM_TYPE=DDR4  gem5.opt configs/example/ucie_sys/cpu_accel_system_2.py
+    UCIE_MEM_TYPE=DDR3  gem5.opt configs/example/ucie_sys/cpu_accel_system_2.py
+    UCIE_MEM_TYPE=HBM   gem5.opt configs/example/ucie_sys/cpu_accel_system_2.py
 """
 
 import m5
@@ -14,28 +25,38 @@ from m5.objects import *
 import os
 
 # ── Workload: Conv2D sliding-window pattern ───────────────────────────────────
-HBM_BASE    = 8 * 1024 * 1024 * 1024   # 8 GiB
-IFM_BASE    = HBM_BASE                  # Input Feature Maps  (128 KB)
-WEIGHT_BASE = HBM_BASE + 128 * 1024    # Kernel Weights      (32 KB)
-OFM_BASE    = HBM_BASE + 160 * 1024    # Output Feature Maps (64 KB)
+# Conv2D on a 128×128 feature map, 3×3 kernel, 32 filters:
+#   IFM:  128×128×3  float32 = 196,608 B ≈ 192 KB  (padded to 128 KB here for simplicity)
+#   Weights: 3×3×3×32 float32 = 27,648 B ≈ 27 KB
+#   OFM:  128×128×32 float32 = 2,097,152 B — we write 64 KB here (partial output)
+MEM_TYPE    = os.environ.get("UCIE_MEM_TYPE", "DDR4").upper()
 BURST       = 64
 THROTTLE    = 40_000  # ps
 
-cfg_file = "/tmp/conv2d_offload.cfg"
+# ── Address map ───────────────────────────────────────────────────────────────
+CPU_MEM_SIZE  = '8GiB'
+ACC_MEM_START = 0x200000000   # 8 GiB
+ACC_MEM_SIZE  = '8GiB'
+
+IFM_BASE    = ACC_MEM_START              # Input Feature Maps  (128 KB)
+WEIGHT_BASE = ACC_MEM_START + 128 * 1024 # Kernel Weights      (32 KB)
+OFM_BASE    = ACC_MEM_START + 160 * 1024 # Output Feature Maps (64 KB)
+
+cfg_file = f"/tmp/conv2d_{MEM_TYPE}.cfg"
 with open(cfg_file, "w") as f:
-    # STATE 0: Read Input Feature Maps (image rows)
+    # STATE 0: Read Input Feature Maps (streaming row-by-row)
     f.write(
         f"STATE 0 50000000 LINEAR 100 {IFM_BASE} {IFM_BASE + 131072} "
         f"{BURST} {THROTTLE} {THROTTLE} 0\n"
     )
-    # STATE 1: Read Kernel Weights (small, highly reused)
+    # STATE 1: Read Kernel Weights (small, highly reused across output tiles)
     f.write(
         f"STATE 1 20000000 LINEAR 100 {WEIGHT_BASE} {WEIGHT_BASE + 32768} "
         f"{BURST} {THROTTLE} {THROTTLE} 0\n"
     )
-    # STATE 2: IDLE — 2D sliding-window MAC compute
+    # STATE 2: IDLE — 2D sliding-window multiply-accumulate compute
     f.write("STATE 2 15000000 IDLE\n")
-    # STATE 3: Write Output Feature Maps
+    # STATE 3: Write Output Feature Maps (write-back)
     f.write(
         f"STATE 3 50000000 LINEAR 0 {OFM_BASE} {OFM_BASE + 65536} "
         f"{BURST} {THROTTLE} {THROTTLE} 0\n"
@@ -53,25 +74,35 @@ system = System()
 system.clk_domain   = SrcClockDomain(clock='4GHz', voltage_domain=VoltageDomain())
 system.mem_mode     = 'timing'
 system.cache_line_size = 64
+system.mem_ranges   = [AddrRange('0', size=CPU_MEM_SIZE),
+                       AddrRange(str(ACC_MEM_START), size=ACC_MEM_SIZE)]
 
-# Chiplet 0 — CPU
+# ── Chiplet 0: CPU side ───────────────────────────────────────────────────────
 system.cpu_traffic = TrafficGen(config_file=cfg_file)
 system.cpu_membus  = SystemXBar(max_routing_table_size=100_000)
 system.cpu_traffic.port = system.cpu_membus.cpu_side_ports
 
+# CPU local memory — connected DIRECTLY, does NOT go over UCIe
 system.cpu_mem_ctrl = MemCtrl()
-system.cpu_mem_ctrl.dram = DDR4_2400_16x4()
-system.cpu_mem_ctrl.dram.range = AddrRange('0', size='8GiB')
+if MEM_TYPE == "DDR3":
+    system.cpu_mem_ctrl.dram = DDR3_1600_8x8()
+else:
+    system.cpu_mem_ctrl.dram = DDR4_2400_16x4()
+system.cpu_mem_ctrl.dram.range = AddrRange('0', size=CPU_MEM_SIZE)
 system.cpu_membus.mem_side_ports = system.cpu_mem_ctrl.port
 
-# Chiplet 1 — Accelerator
+# ── Chiplet 1: Accelerator side ───────────────────────────────────────────────
 system.acc_membus = SystemXBar(max_routing_table_size=100_000)
 system.acc_mem_ctrl = MemCtrl()
-system.acc_mem_ctrl.dram = HBM_2000_4H_1x64()
-system.acc_mem_ctrl.dram.range = AddrRange('8GiB', size='8GiB')
+if MEM_TYPE == "HBM":
+    system.acc_mem_ctrl.dram = HBM_2000_4H_1x64()
+else:
+    system.acc_mem_ctrl.dram = DDR4_2400_8x8()
+system.acc_mem_ctrl.dram.range = AddrRange(str(ACC_MEM_START), size=ACC_MEM_SIZE)
 system.acc_membus.mem_side_ports = system.acc_mem_ctrl.port
 
-# UCIe Link pair
+# ── UCIe Link pair ────────────────────────────────────────────────────────────
+# Only traffic to the Accelerator HBM (8–16 GiB) crosses the UCIe link.
 ucie_params = dict(
     retry_timeout='25ns', error_rate=1e-10,
     data_rate=4.0, num_lanes=16, phys_delay='2ns', credit_pool=32,
@@ -83,9 +114,24 @@ system.ucie_link_1 = UcieLink(**ucie_params)
 system.ucie_link_1.tx_port = system.acc_membus.cpu_side_ports
 system.ucie_link_0.tx_port = system.ucie_link_1.rx_port
 
+# ── Run ───────────────────────────────────────────────────────────────────────
 root = Root(full_system=False, system=system)
 m5.instantiate()
 
-print("\nStarting Conv2D Offload via UCIe (4GHz, 16×4GT/s, BER=1e-10)...")
+print(f"\n{'='*60}")
+print(f"  UCIe CPU-Accelerator Conv2D Offload — {MEM_TYPE}")
+print(f"{'='*60}")
+print(f"  Workload   : Conv2D 128×128 input, 3×3 kernel, 32 filters")
+print(f"  CPU memory : {MEM_TYPE} (local, 0–8 GiB)")
+print(f"  ACC memory : {'HBM' if MEM_TYPE == 'HBM' else 'DDR4'} (remote, 8–16 GiB)")
+print(f"  UCIe link  : 16 lanes × 4 GT/s  |  BER=1e-10  |  2ns phys delay")
+print(f"{'='*60}\n")
+
 exit_event = m5.simulate()
-print(f"\nExiting @ tick {m5.curTick()}: {exit_event.getCause()}")
+print(f"\nSimulation ended @ tick {m5.curTick()}: {exit_event.getCause()}")
+print("\nKey stats (m5out/stats.txt):")
+print("  system.ucie_link_0.UcieStats.throughputGbps")
+print("  system.ucie_link_0.UcieStats.totalRetransmissions")
+print("  system.ucie_link_0.UcieStats.payloadEfficiency")
+print("  system.ucie_link_0.UcieStats.totalCrcErrors")
+print("  system.ucie_link_0.UcieStats.tlpLatency::mean  (÷1000 = ns)")

@@ -130,18 +130,22 @@ bool UcieLink::UcieRxPort::recvTimingReq(PacketPtr pkt)
         owner->stats.totalFlitsReceived++;
 
         // 1. DETERMINISTIC BER ERROR INJECTION
-        // An error fires exactly every ceil(1/BER) bits received, giving
-        // reproducible results that match the paper's controlled experiments.
+        // BER is defined per-lane. Each flit carries UCIE_FLIT_SIZE_BYTES × 8
+        // bits across numLanes lanes, but only UCIE_FLIT_SIZE_BYTES*8/numLanes
+        // bits travel on each individual lane.  Tracking per-lane bits ensures
+        // the error threshold matches the standard per-lane BER definition.
         // (Retransmitted flits are immune — same as the paper's model.)
-        owner->rxBitsReceived += UCIE_FLIT_SIZE_BYTES * 8;
+        owner->rxBitsReceived += (UCIE_FLIT_SIZE_BYTES * 8) / owner->numLanes;
         bool crcError = (owner->errorRate > 0.0)
                      && !flit->isRetransmission
                      && !owner->rxWaitingForRetry
                      && (owner->rxBitsReceived >= owner->nextErrorAtBits);
 
         if (crcError) {
+            // Schedule the NEXT error: advance by another 1/BER per-lane bits.
             owner->nextErrorAtBits += (uint64_t)((1.0 / owner->errorRate)
-                                                  * UCIE_FLIT_SIZE_BYTES * 8);
+                                                  * UCIE_FLIT_SIZE_BYTES * 8
+                                                  / owner->numLanes);
             owner->stats.totalCrcErrors++;
             owner->rxWaitingForRetry = true;
             owner->sendNak(flit->timestamp);
@@ -304,10 +308,16 @@ void UcieLink::init()
     txCredits = (uint32_t)creditPool;
 
     // Deterministic BER: pre-compute the bit offset of the first error.
-    // An error fires exactly every ceil(1/BER) bits — matching the paper's
-    // controlled, reproducible error-injection methodology.
+    // BER is defined per-lane (industry standard): 1 error every 1/BER bits
+    // on a SINGLE lane.  With numLanes parallel lanes, the aggregate error
+    // probability per flit is numLanes × higher, so the threshold is:
+    //   nextErrorAtBits = ceil(1/BER) × flit_bits / numLanes
+    // At BER=1e-10, 16 lanes, 256 B flit:
+    //   = 1e10 × 2048 / 16 = 1.28×10¹² bits ≈ 625,000 flits (not 8M)
+    // This matches the paper's controlled error-injection methodology.
     if (errorRate > 0.0) {
-        nextErrorAtBits = (uint64_t)((1.0 / errorRate) * UCIE_FLIT_SIZE_BYTES * 8);
+        nextErrorAtBits = (uint64_t)((1.0 / errorRate)
+                          * UCIE_FLIT_SIZE_BYTES * 8 / numLanes);
     }
 
     // NOTE: The UCIe sideband channel (800 MHz fixed clock, used for link

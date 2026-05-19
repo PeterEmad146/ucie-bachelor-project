@@ -21,12 +21,14 @@ import os
 
 # ── How many bits until the first error? ─────────────────────────────────────
 BER            = 1e-10
-FLIT_BITS      = 256 * 8       # 2048 bits per 256-byte flit
-# Error fires after:  ceil(1/BER) bits = 10^10 bits
-# That is:           10^10 / 2048 ≈ 4,882,813 flits
-# We send ~6M flits (64-byte packets → 1 flit each) to guarantee 1 error.
-PACKETS_NEEDED = 6_000_000
-PACKET_SIZE    = 64            # bytes
+FLIT_BITS      = 256 * 8       # 2048 bits per 256-byte flit (across all lanes)
+NUM_LANES      = 16
+# Per-lane BER means: 1 error every 1/BER bits on ONE lane.
+# Aggregate error fires after: ceil(1/BER) × flit_bits / num_lanes
+#   = 1e10 × 2048 / 16 = 1.28×10¹² per-lane bits ≈ 625,000 flits
+# We send 10M packets (1 flit each, 64B < 256B flit) → safely triggers several errors.
+PACKETS_NEEDED = 10_000_000
+PACKET_SIZE    = 64            # bytes (each packet occupies exactly 1 flit)
 INTERVAL_PS    = 500           # ps between packets (high throughput)
 
 cfg_file = "/tmp/ber_retry.cfg"
@@ -74,10 +76,11 @@ m5.instantiate()
 print(f"\n{'='*60}")
 print(f"  UCIe BER Retry Functional Test")
 print(f"{'='*60}")
-print(f"  BER = {BER}  →  1 error per {int(1/BER):,} bits")
-print(f"  Bits per flit = {FLIT_BITS:,}")
-print(f"  Error interval = {int(1/BER) // FLIT_BITS:,} flits")
-print(f"  Sending ~{PACKETS_NEEDED:,} packets to trigger at least 1 error")
+print(f"  BER (per-lane) = {BER}  →  1 error per {int(1/BER):,} per-lane bits")
+print(f"  Flit bits (all lanes) = {FLIT_BITS:,}")
+print(f"  Per-lane bits per flit = {FLIT_BITS // NUM_LANES:,}")
+print(f"  Error interval = {int(1/BER) // (FLIT_BITS // NUM_LANES):,} flits")
+print(f"  Sending ~{PACKETS_NEEDED:,} packets to trigger several errors")
 print(f"{'='*60}\n")
 print("  Expected results:")
 print("    totalCrcErrors      >= 1")
