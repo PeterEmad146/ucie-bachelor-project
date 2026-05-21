@@ -76,41 +76,41 @@ OFV_BASE     = ACC_MEM_START + 18 * 1024
 cfg_file = f"/tmp/pcie_{WORKLOAD}_{MEM_TYPE}.cfg"
 with open(cfg_file, "w") as f:
     if WORKLOAD == "gemm":
-        f.write(f"STATE 0 50000000 LINEAR 100 {A_BASE} {A_BASE + MATRIX_SZ} {BURST} {THROTTLE} {THROTTLE} 0\n")
-        f.write(f"STATE 1 50000000 LINEAR 100 {B_BASE} {B_BASE + MATRIX_SZ} {BURST} {THROTTLE} {THROTTLE} 0\n")
+        f.write(f"STATE 0 0 LINEAR 100 {A_BASE} {A_BASE + MATRIX_SZ} {BURST} {THROTTLE} {THROTTLE} {MATRIX_SZ}\n")
+        f.write(f"STATE 1 0 LINEAR 100 {B_BASE} {B_BASE + MATRIX_SZ} {BURST} {THROTTLE} {THROTTLE} {MATRIX_SZ}\n")
         f.write( "STATE 2 20000000 IDLE\n")
-        f.write(f"STATE 3 50000000 LINEAR 0 {C_BASE} {C_BASE + MATRIX_SZ} {BURST} {THROTTLE} {THROTTLE} 0\n")
+        f.write(f"STATE 3 0 LINEAR 0 {C_BASE} {C_BASE + MATRIX_SZ} {BURST} {THROTTLE} {THROTTLE} {MATRIX_SZ}\n")
         f.write( "STATE 4 1000 EXIT\n")
         f.write( "INIT 0\n")
         for i in range(4): f.write(f"TRANSITION {i} {i+1} 1\n")
         f.write( "TRANSITION 4 4 1\n")
 
     elif WORKLOAD == "conv2d":
-        f.write(f"STATE 0 50000000 LINEAR 100 {IFM_BASE} {IFM_BASE + 131072} {BURST} {THROTTLE} {THROTTLE} 0\n")
-        f.write(f"STATE 1 20000000 LINEAR 100 {WEIGHT_BASE} {WEIGHT_BASE + 32768} {BURST} {THROTTLE} {THROTTLE} 0\n")
+        f.write(f"STATE 0 0 LINEAR 100 {IFM_BASE} {IFM_BASE + 131072} {BURST} {THROTTLE} {THROTTLE} 131072\n")
+        f.write(f"STATE 1 0 LINEAR 100 {WEIGHT_BASE} {WEIGHT_BASE + 32768} {BURST} {THROTTLE} {THROTTLE} 32768\n")
         f.write( "STATE 2 15000000 IDLE\n")
-        f.write(f"STATE 3 50000000 LINEAR 0 {OFM_BASE} {OFM_BASE + 65536} {BURST} {THROTTLE} {THROTTLE} 0\n")
+        f.write(f"STATE 3 0 LINEAR 0 {OFM_BASE} {OFM_BASE + 65536} {BURST} {THROTTLE} {THROTTLE} 65536\n")
         f.write( "STATE 4 1000 EXIT\n")
         f.write( "INIT 0\n")
         for i in range(4): f.write(f"TRANSITION {i} {i+1} 1\n")
         f.write( "TRANSITION 4 4 1\n")
 
     elif WORKLOAD == "fft":
-        f.write(f"STATE 0 10000000 LINEAR 100 {FFT_IN_BASE} {FFT_IN_BASE + FFT_ARRAY_B} {BURST} {THROTTLE} {THROTTLE} 0\n")
-        f.write(f"STATE 1 10000000 RANDOM 100 {FFT_IN_BASE} {FFT_IN_BASE + FFT_ARRAY_B} {BURST} {THROTTLE} {THROTTLE} 0\n")
-        f.write(f"STATE 2  8000000 LINEAR 100 {TWIDDLE_BASE} {TWIDDLE_BASE + TWIDDLE_B} {BURST} {THROTTLE} {THROTTLE} 0\n")
-        f.write(f"STATE 3 20000000 LINEAR 0 {IFV_BASE} {IFV_BASE + FFT_ARRAY_B} {BURST} {THROTTLE} {THROTTLE} 0\n")
-        f.write(f"STATE 4 30000000 LINEAR 100 {OFV_BASE} {OFV_BASE + 65536} {BURST} {THROTTLE} {THROTTLE} 0\n")
+        f.write(f"STATE 0 0 LINEAR 100 {FFT_IN_BASE} {FFT_IN_BASE + FFT_ARRAY_B} {BURST} {THROTTLE} {THROTTLE} {FFT_ARRAY_B}\n")
+        f.write(f"STATE 1 0 RANDOM 100 {FFT_IN_BASE} {FFT_IN_BASE + FFT_ARRAY_B} {BURST} {THROTTLE} {THROTTLE} {FFT_ARRAY_B}\n")
+        f.write(f"STATE 2 0 LINEAR 100 {TWIDDLE_BASE} {TWIDDLE_BASE + TWIDDLE_B} {BURST} {THROTTLE} {THROTTLE} {TWIDDLE_B}\n")
+        f.write(f"STATE 3 0 LINEAR 0 {IFV_BASE} {IFV_BASE + FFT_ARRAY_B} {BURST} {THROTTLE} {THROTTLE} {FFT_ARRAY_B}\n")
+        f.write(f"STATE 4 0 LINEAR 100 {OFV_BASE} {OFV_BASE + 65536} {BURST} {THROTTLE} {THROTTLE} 65536\n")
         f.write( "STATE 5 1000 EXIT\n")
         f.write( "INIT 0\n")
         for i in range(5): f.write(f"TRANSITION {i} {i+1} 1\n")
         f.write( "TRANSITION 5 5 1\n")
 
     elif WORKLOAD == "conv3d":
-        f.write(f"STATE 0 30000000 LINEAR 100 {IFV_BASE} {IFV_BASE + 16384} {BURST} {THROTTLE} {THROTTLE} 0\n")
-        f.write(f"STATE 1 10000000 LINEAR 100 {W3D_BASE} {W3D_BASE + 2048} {BURST} {THROTTLE} {THROTTLE} 0\n")
+        f.write(f"STATE 0 0 LINEAR 100 {IFV_BASE} {IFV_BASE + 16384} {BURST} {THROTTLE} {THROTTLE} 16384\n")
+        f.write(f"STATE 1 0 LINEAR 100 {W3D_BASE} {W3D_BASE + 2048} {BURST} {THROTTLE} {THROTTLE} 2048\n")
         f.write( "STATE 2 20000000 IDLE\n")
-        f.write(f"STATE 3 40000000 LINEAR 0 {OFV_BASE} {OFV_BASE + 65536} {BURST} {THROTTLE} {THROTTLE} 0\n")
+        f.write(f"STATE 3 0 LINEAR 0 {OFV_BASE} {OFV_BASE + 65536} {BURST} {THROTTLE} {THROTTLE} 65536\n")
         f.write( "STATE 4 1000 EXIT\n")
         f.write( "INIT 0\n")
         for i in range(4): f.write(f"TRANSITION {i} {i+1} 1\n")
@@ -155,6 +155,7 @@ system.acc_membus.mem_side_ports = system.acc_mem_ctrl.port
 # delay = one-way serialisation + controller latency (100 ns for PCIe Gen4).
 # No flit framing, CRC checks, or credit flow-control — only delay is modelled.
 system.pcie_bridge = Bridge(delay=PCIE_LATENCY_NS)
+system.pcie_bridge.ranges = [AddrRange(str(ACC_MEM_START), size=ACC_MEM_SIZE)]
 system.pcie_bridge.mem_side_port  = system.acc_membus.cpu_side_ports
 system.pcie_bridge.cpu_side_port  = system.cpu_membus.mem_side_ports
 

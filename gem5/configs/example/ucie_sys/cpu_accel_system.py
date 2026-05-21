@@ -60,20 +60,20 @@ cfg_file = f"/tmp/gemm_{MEM_TYPE}.cfg"
 with open(cfg_file, "w") as f:
     # STATE 0: CPU reads matrix A from Accelerator HBM over UCIe (reads = cmd 100)
     f.write(
-        f"STATE 0 50000000 LINEAR 100 {A_BASE} {A_BASE + MATRIX_SZ} "
-        f"{BURST} {THROTTLE} {THROTTLE} 0\n"
+        f"STATE 0 0 LINEAR 100 {A_BASE} {A_BASE + MATRIX_SZ} "
+        f"{BURST} {THROTTLE} {THROTTLE} {MATRIX_SZ}\n"
     )
     # STATE 1: CPU reads matrix B from Accelerator HBM over UCIe
     f.write(
-        f"STATE 1 50000000 LINEAR 100 {B_BASE} {B_BASE + MATRIX_SZ} "
-        f"{BURST} {THROTTLE} {THROTTLE} 0\n"
+        f"STATE 1 0 LINEAR 100 {B_BASE} {B_BASE + MATRIX_SZ} "
+        f"{BURST} {THROTTLE} {THROTTLE} {MATRIX_SZ}\n"
     )
     # STATE 2: IDLE — represents the GEMM multiply-accumulate compute time
     f.write("STATE 2 20000000 IDLE\n")
     # STATE 3: CPU writes result matrix C back to Accelerator HBM over UCIe (writes = cmd 0)
     f.write(
-        f"STATE 3 50000000 LINEAR 0 {C_BASE} {C_BASE + MATRIX_SZ} "
-        f"{BURST} {THROTTLE} {THROTTLE} 0\n"
+        f"STATE 3 0 LINEAR 0 {C_BASE} {C_BASE + MATRIX_SZ} "
+        f"{BURST} {THROTTLE} {THROTTLE} {MATRIX_SZ}\n"
     )
     f.write("STATE 4 1000 EXIT\n")
     f.write("INIT 0\n")
