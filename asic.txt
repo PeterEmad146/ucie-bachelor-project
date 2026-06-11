@@ -1,0 +1,170 @@
+
+15. Printing statistics.
+
+=== ucie_lphy_top ===
+
+   Number of wires:              55358
+   Number of wire bits:         116283
+   Number of public wires:        3951
+   Number of public wire bits:   58961
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:              56885
+     $_DLATCH_N_                     1
+     AND2_X1                      1371
+     AND3_X1                       296
+     AND4_X1                       183
+     AOI211_X1                     255
+     AOI21_X1                     2926
+     AOI221_X1                      62
+     AOI222_X1                     308
+     AOI22_X1                     4705
+     BUF_X1                          2
+     DFFR_X1                      7928
+     DFFS_X1                      2081
+     INV_X1                       5626
+     MUX2_X1                      6938
+     NAND2_X1                     4737
+     NAND3_X1                     1419
+     NAND4_X1                      488
+     NOR2_X1                      3264
+     NOR3_X1                       571
+     NOR4_X1                       972
+     OAI211_X1                     359
+     OAI21_X1                     5585
+     OAI221_X1                     116
+     OAI222_X1                       2
+     OAI22_X1                      941
+     OAI33_X1                       82
+     OR2_X1                        777
+     OR3_X1                        266
+     OR4_X1                        127
+     XNOR2_X1                     2885
+     XOR2_X1                      1612
+
+   Area for cell type $_DLATCH_N_ is unknown!
+
+   Chip area for module '\ucie_lphy_top': 108787.882000
+
+
+
+This is free software, and you are free to change and redistribute it
+under certain conditions; type `show_copying' for details. 
+This program comes with ABSOLUTELY NO WARRANTY; for details type `show_warranty'.
+Warning 198: synth_netlist.v line 87458, module $_DLATCH_N_ not found. Creating black box for \u_rx_top.clkgate_rx_inst.clk_en_latched_reg .
+Startpoint: _085069_ (rising edge-triggered flip-flop clocked by clk_1g)
+Endpoint: _075328_ (rising edge-triggered flip-flop clocked by clk_1g)
+Path Group: clk_1g
+Path Type: max
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk_1g (rise edge)
+   0.00    0.00   clock network delay (ideal)
+   0.00    0.00 ^ _085069_/CK (DFFR_X1)
+   2.55    2.55 ^ _085069_/Q (DFFR_X1)
+  19.08   21.63 v _068210_/ZN (NAND2_X1)
+   0.48   22.12 ^ _070731_/ZN (NOR3_X1)
+   0.04   22.15 v _070740_/ZN (AOI22_X1)
+   0.05   22.20 ^ _070741_/ZN (AOI21_X1)
+   0.00   22.20 ^ _075328_/D (DFFR_X1)
+          22.20   data arrival time
+
+   1.00    1.00   clock clk_1g (rise edge)
+   0.00    1.00   clock network delay (ideal)
+   0.00    1.00   clock reconvergence pessimism
+           1.00 ^ _075328_/CK (DFFR_X1)
+  -0.04    0.96   library setup time
+           0.96   data required time
+---------------------------------------------------------
+           0.96   data required time
+         -22.20   data arrival time
+---------------------------------------------------------
+         -21.24   slack (VIOLATED)
+
+
+Startpoint: _085883_ (rising edge-triggered flip-flop clocked by clk_800m)
+Endpoint: _086448_ (rising edge-triggered flip-flop clocked by clk_800m)
+Path Group: clk_800m
+Path Type: max
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk_800m (rise edge)
+   0.00    0.00   clock network delay (ideal)
+   0.00    0.00 ^ _085883_/CK (DFFR_X1)
+   0.98    0.98 ^ _085883_/Q (DFFR_X1)
+   0.08    1.06 v _086235_/ZN (OAI211_X1)
+   0.08    1.14 ^ _086236_/ZN (OAI22_X1)
+   0.00    1.14 ^ _086448_/D (DFFR_X1)
+           1.14   data arrival time
+
+   1.25    1.25   clock clk_800m (rise edge)
+   0.00    1.25   clock network delay (ideal)
+   0.00    1.25   clock reconvergence pessimism
+           1.25 ^ _086448_/CK (DFFR_X1)
+  -0.05    1.20   library setup time
+           1.20   data required time
+---------------------------------------------------------
+           1.20   data required time
+          -1.14   data arrival time
+---------------------------------------------------------
+           0.06   slack (MET)
+
+
+Startpoint: _054545_ (rising edge-triggered flip-flop clocked by clk_1g)
+Endpoint: _054546_ (rising edge-triggered flip-flop clocked by clk_1g)
+Path Group: clk_1g
+Path Type: min
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk_1g (rise edge)
+   0.00    0.00   clock network delay (ideal)
+   0.00    0.00 ^ _054545_/CK (DFFR_X1)
+   0.08    0.08 v _054545_/Q (DFFR_X1)
+   0.00    0.08 v _054546_/D (DFFR_X1)
+           0.08   data arrival time
+
+   0.00    0.00   clock clk_1g (rise edge)
+   0.00    0.00   clock network delay (ideal)
+   0.00    0.00   clock reconvergence pessimism
+           0.00 ^ _054546_/CK (DFFR_X1)
+   0.00    0.00   library hold time
+           0.00   data required time
+---------------------------------------------------------
+           0.00   data required time
+          -0.08   data arrival time
+---------------------------------------------------------
+           0.08   slack (MET)
+
+
+Startpoint: _086447_ (rising edge-triggered flip-flop clocked by clk_800m)
+Endpoint: _086447_ (rising edge-triggered flip-flop clocked by clk_800m)
+Path Group: clk_800m
+Path Type: min
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk_800m (rise edge)
+   0.00    0.00   clock network delay (ideal)
+   0.00    0.00 ^ _086447_/CK (DFFR_X1)
+   0.08    0.08 v _086447_/Q (DFFR_X1)
+   0.01    0.10 ^ _086144_/ZN (INV_X1)
+   0.01    0.10 v _086233_/ZN (OAI22_X1)
+   0.00    0.10 v _086447_/D (DFFR_X1)
+           0.10   data arrival time
+
+   0.00    0.00   clock clk_800m (rise edge)
+   0.00    0.00   clock network delay (ideal)
+   0.00    0.00   clock reconvergence pessimism
+           0.00 ^ _086447_/CK (DFFR_X1)
+   0.00    0.00   library hold time
+           0.00   data required time
+---------------------------------------------------------
+           0.00   data required time
+          -0.10   data arrival time
+---------------------------------------------------------
+           0.10   slack (MET)
+
